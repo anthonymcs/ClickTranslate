@@ -60,7 +60,7 @@ def resolve_font_path(preferred_names: List[str]) -> Optional[str]:
 
 def get_font(size: int, is_sfx: bool = False) -> ImageFont.FreeTypeFont:
     """Carga la fuente apropiada con el tamaño deseado o recurre al fallback de Pillow."""
-    preferred = ["Impact.ttf", "impact.ttf", "Bangers.ttf"] if is_sfx else ["WildWords.ttf", "AnimeAce.ttf", "animeace.ttf", "comic.ttf"]
+    preferred = ["Impact.ttf", "impact.ttf", "Bangers.ttf"] if is_sfx else ["ComicBold.ttf", "WildWords.ttf", "AnimeAce.ttf", "animeace.ttf", "Comic.ttf", "comic.ttf"]
     font_path = resolve_font_path(preferred)
 
     if font_path:
@@ -94,28 +94,30 @@ def fit_text_in_balloon(
     text: str,
     box_w: int,
     box_h: int,
-    min_size: int = 9,
+    min_size: int = 7,
     max_size: int = 28
 ) -> Tuple[List[str], ImageFont.ImageFont, int, int]:
     """
     Encuentra de forma adaptativa el tamaño de fuente óptimo y la división en líneas (word-wrap)
     para que el texto encaje perfectamente en el bounding box del globo.
     """
+    # En scanlation profesional de manga/cómics, el diálogo siempre se rotula en MAYÚSCULAS
+    text = text.upper().strip()
     best_font = None
     best_lines = [text]
     best_w, best_h = box_w, box_h
 
     # Margen de seguridad interior adaptativo (90% del espacio)
-    usable_w = max(24, int(box_w * 0.90))
-    usable_h = max(24, int(box_h * 0.90))
+    usable_w = max(18, int(box_w * 0.90))
+    usable_h = max(18, int(box_h * 0.90))
 
     # Búsqueda desde tamaño mayor hacia menor
     for size in range(max_size, min_size - 1, -1):
         font = get_font(size=size, is_sfx=False)
-        avg_char_w = max(4, int(size * 0.52))
-        chars_per_line = max(5, usable_w // avg_char_w)
+        avg_char_w = max(3, int(size * 0.52))
+        chars_per_line = max(3, usable_w // avg_char_w)
 
-        lines = textwrap.wrap(text, width=chars_per_line, break_long_words=False)
+        lines = textwrap.wrap(text, width=chars_per_line, break_long_words=True)
         if not lines:
             lines = [text]
 
@@ -153,14 +155,7 @@ def render_typesetting(img_bgr: np.ndarray, blocks: List[TextBlock]) -> np.ndarr
         cy = (y1 + y2) // 2
 
         if block.type == "dialog":
-            # Si el cuadro de OCR original era vertical estrecho (mangas orientales),
-            # expandir el ancho útil horizontalmente para que el texto occidental encaje con holgura
-            if bw < bh * 0.75:
-                target_w = max(bw, int(bh * 0.82))
-                eff_bw = min(pil_img.width - 10, target_w)
-            else:
-                eff_bw = bw
-
+            eff_bw = bw
             lines, font, text_w, text_h = fit_text_in_balloon(draw, text, eff_bw, bh)
 
             # Posición de inicio centrada verticalmente con respecto al centro del globo
@@ -182,12 +177,13 @@ def render_typesetting(img_bgr: np.ndarray, blocks: List[TextBlock]) -> np.ndarr
                 curr_y += lh + 2
 
         else:
-            # SFX / Onomatopeyas: Dibujar grande con contorno contrastante
-            sfx_size = min(42, max(14, int(bh * 0.7)))
+            # SFX / Onomatopeyas: Tipografía con contorno contrastante ajustada a dimensiones
+            sfx_size = min(22, max(9, int(min(bw, bh) * 0.65)))
             font = get_font(size=sfx_size, is_sfx=True)
 
-            # Word wrap básico para SFX si es largo
-            lines = textwrap.wrap(text, width=max(6, int(bw / (sfx_size * 0.6))))
+            # Word wrap adaptativo para SFX asegurando que no desborde horizontalmente
+            chars_per_line = max(3, int(bw / max(3, int(sfx_size * 0.55))))
+            lines = textwrap.wrap(text, width=chars_per_line, break_long_words=True)
             if not lines:
                 lines = [text]
 
@@ -200,19 +196,20 @@ def render_typesetting(img_bgr: np.ndarray, blocks: List[TextBlock]) -> np.ndarr
                 lh = l_bbox[3] - l_bbox[1]
                 line_x = x1 + (bw - lw) // 2
 
-                # Trazo contrastante (stroke): texto blanco con borde negro, o viceversa
+                # Trazo contrastante (stroke): texto blanco con borde negro
                 fill_color = (255, 255, 255)
                 stroke_color = (0, 0, 0)
+                stroke_w = 2 if sfx_size >= 14 else 1
 
                 draw.text(
                     (line_x, curr_y),
                     line,
                     font=font,
                     fill=fill_color,
-                    stroke_width=3,
+                    stroke_width=stroke_w,
                     stroke_fill=stroke_color
                 )
-                curr_y += lh + 3
+                curr_y += lh + 2
 
     # Retornar BGR para OpenCV / codificación final
     out_rgb = np.array(pil_img)

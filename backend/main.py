@@ -32,8 +32,10 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
-from core.detector import detect_balloons_and_sfx
-from core.ocr_engine import run_ocr
+from PIL import Image
+from core.comic_detector import detect_comic_text
+from core.detector import detect_balloons_and_sfx, get_dominant_bg_color, sort_blocks, TextBlock
+from core.ocr_engine import run_ocr, get_manga_ocr, get_rapid_ocr
 from core.inpainter import clean_page
 from core.translator import translate_page_contextual, fetch_available_models
 from core.typesetter import render_typesetting
@@ -72,6 +74,7 @@ def process_single_image_in_memory(
 ) -> Tuple[bytes, bytes]:
     """
     Ejecuta el pipeline de traducción completo sobre los bytes de una imagen en memoria RAM.
+    Integra Comic-Text-Detector (IA especializada en mangas/cómics) + Manga-OCR / RapidOCR.
     Retorna: (imagen_traducida_png_bytes, miniatura_jpeg_bytes)
     """
     np_arr = np.frombuffer(image_bytes, np.uint8)
@@ -80,24 +83,139 @@ def process_single_image_in_memory(
     if img_bgr is None:
         raise ValueError("No se pudo decodificar la imagen proporcionada.")
 
-    # 1. OCR Ultra-Rápido con RapidOCR + Agrupamiento
-    ocr_results = run_ocr(img_bgr, raw_lang=src_lang)
-    raw_boxes = [box for box, _ in ocr_results]
+    im_h, im_w = img_bgr.shape[:2]
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    lang_code = (src_lang or "auto").lower().strip()
+    is_japanese = lang_code in ["ja", "jp", "japanese", "japonés", "japones"]
 
-    # 2. Detección y clasificación de globos vs SFX
-    blocks, balloon_mask, sfx_mask = detect_balloons_and_sfx(img_bgr, raw_boxes, lang=src_lang)
+    # 1. Detección neuronal especializada con Comic-Text-Detector (ONNX)
+    comic_blocks, text_mask = detect_comic_text(img_bgr)
 
-    # Asignar texto de OCR al bloque correspondiente
-    for block in blocks:
-        for (box, text) in ocr_results:
-            if box == block.box:
-                block.text = text
-                break
+    if comic_blocks:
+        logger.info(f"ComicDetector identificó {len(comic_blocks)} regiones en la página.")
+        manga_engine = get_manga_ocr() if (is_japanese or lang_code == "auto") else None
+        rapid_engine = get_rapid_ocr()
 
-    # 3. Limpieza visual instantánea (OpenCV Telea + Relleno)
-    cleaned_img = clean_page(img_bgr, blocks, balloon_mask, sfx_mask)
+        reading_dir = "rtl" if lang_code in ["ja", "jp", "auto"] else "ltr"
+        raw_blocks = []
+        cleaned_img = img_bgr.copy()
 
-    # 4. Traducción multi-idioma (Fast Google / Ollama)
+        # Detección de contornos reales de globos de diálogo para ajuste scanlation
+        _, thresh = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        balloon_contours = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            bx, by, bw, bh = cv2.boundingRect(cnt)
+            if area > 800 and (bw < im_w * 0.90 and bh < im_h * 0.90):
+                balloon_contours.append((cnt, (bx, by, bx + bw, by + bh)))
+
+        for idx, cb in enumerate(comic_blocks):
+            x1, y1, x2, y2 = cb["box"]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(im_w, x2), min(im_h, y2)
+            if x2 - x1 < 5 or y2 - y1 < 5:
+                continue
+
+            crop_bgr = img_bgr[y1:y2, x1:x2]
+            crop_gray = gray[y1:y2, x1:x2]
+            dom_color, is_uniform = get_dominant_bg_color(img_bgr, (x1, y1, x2, y2))
+
+            center_pt = ((x1 + x2) // 2, (y1 + y2) // 2)
+            matching_balloon = None
+            for cnt, bbox in balloon_contours:
+                if cv2.pointPolygonTest(cnt, center_pt, False) >= 0:
+                    matching_balloon = bbox
+                    break
+
+            if matching_balloon:
+                block_type = "dialog"
+                bx1, by1, bx2, by2 = matching_balloon
+                eff_box = (bx1 + 4, max(y1, by1 + 4), bx2 - 4, min(y2, by2 - 4))
+            else:
+                if is_uniform and float(np.mean(dom_color)) > 210:
+                    block_type = "dialog"
+                else:
+                    block_type = "sfx"
+                eff_box = (x1, y1, x2, y2)
+
+            # OCR especializado en el recorte
+            extracted_text = ""
+            if manga_engine is not None and crop_bgr.size > 0:
+                try:
+                    crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+                    pil_crop = Image.fromarray(crop_rgb)
+                    extracted_text = manga_engine(pil_crop).strip()
+                except Exception as e:
+                    logger.warning(f"Error Manga-OCR en recorte: {e}")
+
+            if not extracted_text and rapid_engine is not None and crop_bgr.size > 0:
+                try:
+                    r_res, _ = rapid_engine(crop_bgr)
+                    if r_res:
+                        extracted_text = " ".join([item[1] for item in r_res]).strip()
+                except Exception as e:
+                    logger.warning(f"Error RapidOCR en recorte: {e}")
+
+            if not extracted_text:
+                continue
+
+            # Inpainting seguro: limpiar exclusivamente la región de texto original sin tocar bordes
+            if block_type == "dialog":
+                p_gray = gray[y1:y2, x1:x2]
+                bg_bright = sum(dom_color) / 3.0
+                if bg_bright > 175 or is_uniform:
+                    t_mask = (p_gray < 205).astype(np.uint8)
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                    dilated = cv2.dilate(t_mask, kernel, iterations=1)
+                    target_color = (255, 255, 255) if bg_bright > 185 else dom_color
+                    cleaned_img[y1:y2, x1:x2][dilated > 0] = target_color
+                else:
+                    sub_m = text_mask[y1:y2, x1:x2]
+                    if np.count_nonzero(sub_m) > 0:
+                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                        dilated = cv2.dilate(sub_m, kernel, iterations=1)
+                        inpainted = cv2.inpaint(cleaned_img[y1:y2, x1:x2], dilated, 3, cv2.INPAINT_TELEA)
+                        cleaned_img[y1:y2, x1:x2] = inpainted
+            else:
+                sub_m = text_mask[y1:y2, x1:x2]
+                if np.count_nonzero(sub_m) > 0:
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                    dilated = cv2.dilate(sub_m, kernel, iterations=1)
+                    inpainted = cv2.inpaint(cleaned_img[y1:y2, x1:x2], dilated, 3, cv2.INPAINT_TELEA)
+                    cleaned_img[y1:y2, x1:x2] = inpainted
+
+            text_color = (0, 0, 0) if block_type == "dialog" else (255, 255, 255)
+
+            tb = TextBlock(
+                id=idx + 1,
+                box=eff_box,
+                type=block_type,
+                text=extracted_text,
+                bg_color=dom_color,
+                text_color=text_color,
+                is_uniform_bg=is_uniform
+            )
+            raw_blocks.append(tb)
+
+        blocks = sort_blocks(raw_blocks, reading_direction=reading_dir)
+        for i, b in enumerate(blocks):
+            b.id = i + 1
+
+    else:
+        # Fallback para imágenes generales donde no aplique modelo de cómic
+        logger.info("Fallback a detección RapidOCR general.")
+        ocr_results = run_ocr(img_bgr, raw_lang=src_lang)
+        raw_boxes = [box for box, _ in ocr_results]
+        blocks, balloon_mask, sfx_mask = detect_balloons_and_sfx(img_bgr, raw_boxes, lang=src_lang)
+        for block in blocks:
+            for (box, text) in ocr_results:
+                if box == block.box:
+                    block.text = text
+                    break
+        cleaned_img = clean_page(img_bgr, blocks, balloon_mask, sfx_mask)
+
+    # 4. Traducción multi-idioma contextual
     translations = translate_page_contextual(
         blocks,
         model_name=model_name,
@@ -109,7 +227,7 @@ def process_single_image_in_memory(
         if block.id in translations:
             block.translated_text = translations[block.id]
 
-    # 5. Re-tipografía inteligente (Pillow con auto-fit y fuentes del sistema)
+    # 5. Re-tipografía Scanlation profesional (Mayúsculas, centrado, ajuste en globo)
     final_bgr = render_typesetting(cleaned_img, blocks)
 
     # Codificar a PNG en memoria RAM
