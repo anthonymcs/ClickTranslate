@@ -94,8 +94,8 @@ def fit_text_in_balloon(
     text: str,
     box_w: int,
     box_h: int,
-    min_size: int = 10,
-    max_size: int = 36
+    min_size: int = 9,
+    max_size: int = 28
 ) -> Tuple[List[str], ImageFont.ImageFont, int, int]:
     """
     Encuentra de forma adaptativa el tamaño de fuente óptimo y la división en líneas (word-wrap)
@@ -105,22 +105,21 @@ def fit_text_in_balloon(
     best_lines = [text]
     best_w, best_h = box_w, box_h
 
-    # Margen de seguridad interior (12%)
-    usable_w = max(20, int(box_w * 0.86))
-    usable_h = max(20, int(box_h * 0.86))
+    # Margen de seguridad interior adaptativo (90% del espacio)
+    usable_w = max(24, int(box_w * 0.90))
+    usable_h = max(24, int(box_h * 0.90))
 
     # Búsqueda desde tamaño mayor hacia menor
-    for size in range(max_size, min_size - 1, -2):
+    for size in range(max_size, min_size - 1, -1):
         font = get_font(size=size, is_sfx=False)
-        # Estimación de caracteres por línea según el ancho
-        avg_char_w = max(4, int(size * 0.55))
-        chars_per_line = max(4, usable_w // avg_char_w)
+        avg_char_w = max(4, int(size * 0.52))
+        chars_per_line = max(5, usable_w // avg_char_w)
 
         lines = textwrap.wrap(text, width=chars_per_line, break_long_words=False)
         if not lines:
             lines = [text]
 
-        w_calc, h_calc = calculate_text_dimensions(draw, lines, font)
+        w_calc, h_calc = calculate_text_dimensions(draw, lines, font, line_spacing=2)
         if w_calc <= usable_w and h_calc <= usable_h:
             return lines, font, w_calc, h_calc
 
@@ -134,7 +133,7 @@ def fit_text_in_balloon(
 def render_typesetting(img_bgr: np.ndarray, blocks: List[TextBlock]) -> np.ndarray:
     """
     Dibuja los textos traducidos en la imagen limpia:
-    - Diálogos: Centrados dentro del globo con auto-fit y color armónico.
+    - Diálogos: Centrados dentro del globo con auto-fit y color armónico estilo scanlation.
     - SFX: Tipografía destacada con trazo de borde (stroke) contrastante.
     """
     # Convertir a RGB para dibujar con Pillow
@@ -150,26 +149,37 @@ def render_typesetting(img_bgr: np.ndarray, blocks: List[TextBlock]) -> np.ndarr
         x1, y1, x2, y2 = block.box
         bw = max(10, x2 - x1)
         bh = max(10, y2 - y1)
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
 
         if block.type == "dialog":
-            lines, font, text_w, text_h = fit_text_in_balloon(draw, text, bw, bh)
-            # Calcular posición de inicio para centrar verticalmente
-            start_y = y1 + (bh - text_h) // 2
+            # Si el cuadro de OCR original era vertical estrecho (mangas orientales),
+            # expandir el ancho útil horizontalmente para que el texto occidental encaje con holgura
+            if bw < bh * 0.75:
+                target_w = max(bw, int(bh * 0.82))
+                eff_bw = min(pil_img.width - 10, target_w)
+            else:
+                eff_bw = bw
 
+            lines, font, text_w, text_h = fit_text_in_balloon(draw, text, eff_bw, bh)
+
+            # Posición de inicio centrada verticalmente con respecto al centro del globo
+            start_y = cy - text_h // 2
             curr_y = start_y
+
             for line in lines:
                 l_bbox = draw.textbbox((0, 0), line, font=font)
                 lw = l_bbox[2] - l_bbox[0]
                 lh = l_bbox[3] - l_bbox[1]
-                # Centrado horizontal por cada línea
-                line_x = x1 + (bw - lw) // 2
+                # Centrado horizontal exacto por línea respecto al eje central
+                line_x = cx - lw // 2
                 draw.text(
                     (line_x, curr_y),
                     line,
                     font=font,
                     fill=block.text_color
                 )
-                curr_y += lh + 4
+                curr_y += lh + 2
 
         else:
             # SFX / Onomatopeyas: Dibujar grande con contorno contrastante

@@ -49,32 +49,32 @@ def get_manga_ocr():
 def group_text_boxes(
     raw_detections: List[Dict[str, Any]],
     img_shape: Tuple[int, int],
-    max_v_dist: int = 40,
-    max_h_dist: int = 50
+    max_v_dist: int = 24,
+    max_h_dist: int = 30
 ) -> List[Tuple[Tuple[int, int, int, int], str]]:
     """
     Agrupa líneas de texto cercanas que pertenecen al mismo globo de diálogo o viñeta.
-    Retorna lista de: [((x1, y1, x2, y2), texto_combinado)]
+    Respeta el sentido de lectura:
+    - Vertical (manga/manhua): Columnas de derecha a izquierda.
+    - Horizontal (cómics/webtoons): Líneas de arriba hacia abajo.
     """
     if not raw_detections:
         return []
 
     h_img, w_img = img_shape[:2]
 
-    # Filtrar detecciones con confianza razonable (>= 0.40) y texto no vacío
+    # Filtrar detecciones con confianza razonable (>= 0.28)
     valid = []
     for d in raw_detections:
-        box = d["box"]
         text = d["text"].strip()
         score = d.get("score", 1.0)
-        # Ignorar caracteres sueltos de ruido o muy baja confianza
-        if len(text) >= 1 and score >= 0.40:
+        if len(text) >= 1 and score >= 0.28:
             valid.append(d)
 
     if not valid:
         return []
 
-    # Ordenar verticalmente de arriba hacia abajo
+    # Ordenar preliminarmente
     valid.sort(key=lambda item: (item["box"][1], item["box"][0]))
 
     groups: List[Dict[str, Any]] = []
@@ -87,36 +87,51 @@ def group_text_boxes(
         for g in groups:
             gx1, gy1, gx2, gy2 = g["box"]
 
-            # Verificar proximidad vertical (líneas consecutivas en el mismo globo)
-            v_close = (y1 >= gy1 - 15) and (y1 <= gy2 + max_v_dist)
-            # Verificar solapamiento o cercanía horizontal
+            # Comprobar si pertenecen al mismo globo de diálogo
+            # 1. Proximidad vertical para líneas horizontales apiladas
+            v_close = (y1 >= gy1 - 18) and (y1 <= gy2 + max_v_dist)
             h_overlap = not (x2 < gx1 - max_h_dist or x1 > gx2 + max_h_dist)
 
-            if v_close and h_overlap:
+            # 2. Columnas paralelas en texto vertical (similar Y, X contiguo)
+            v_overlap = not (y2 < gy1 - 10 or y1 > gy2 + 10)
+            h_close = (abs(x1 - gx2) <= max_h_dist) or (abs(gx1 - x2) <= max_h_dist)
+
+            if (v_close and h_overlap) or (v_overlap and h_close):
                 g["box"] = (min(gx1, x1), min(gy1, y1), max(gx2, x2), max(gy2, y2))
-                g["texts"].append(text)
+                g["items"].append(item)
                 merged = True
                 break
 
         if not merged:
             groups.append({
                 "box": (x1, y1, x2, y2),
-                "texts": [text]
+                "items": [item]
             })
 
     results: List[Tuple[Tuple[int, int, int, int], str]] = []
     for g in groups:
         box = g["box"]
-        # Añadir un pequeño margen (padding) al cuadro agrupado para abarcar todo el globo
-        pad_x = max(4, int((box[2] - box[0]) * 0.08))
-        pad_y = max(4, int((box[3] - box[1]) * 0.08))
+        gw = box[2] - box[0]
+        gh = box[3] - box[1]
+
+        # Si el bloque es predominantemente vertical, ordenar columnas de derecha a izquierda
+        if gh > gw * 1.15:
+            sorted_items = sorted(g["items"], key=lambda it: (-it["box"][0], it["box"][1]))
+        else:
+            sorted_items = sorted(g["items"], key=lambda it: (it["box"][1], it["box"][0]))
+
+        combined_text = " ".join([it["text"] for it in sorted_items]).strip()
+
+        # Margen adaptativo alrededor del globo
+        pad_x = max(5, int(gw * 0.10))
+        pad_y = max(5, int(gh * 0.10))
         expanded_box = (
             max(0, box[0] - pad_x),
             max(0, box[1] - pad_y),
             min(w_img, box[2] + pad_x),
             min(h_img, box[3] + pad_y),
         )
-        combined_text = " ".join(g["texts"]).strip()
+
         if combined_text:
             results.append((expanded_box, combined_text))
 
@@ -165,18 +180,20 @@ def run_ocr(img_bgr: np.ndarray, raw_lang: str = "auto") -> List[Tuple[Tuple[int
     # Agrupar líneas en globos de diálogo coherentes
     grouped_results = group_text_boxes(raw_detections, img_shape=(h, w))
 
-    def contains_cjk_or_japanese(txt: str) -> bool:
+    def contains_japanese_kana(txt: str) -> bool:
+        """Comprueba si el texto contiene Hiragana o Katakana, caracteres exclusivos del idioma japonés."""
         for ch in txt:
             code = ord(ch)
-            if (0x3040 <= code <= 0x309F) or (0x30A0 <= code <= 0x30FF) or (0x4E00 <= code <= 0x9FFF):
+            if (0x3040 <= code <= 0x309F) or (0x30A0 <= code <= 0x30FF):
                 return True
         return False
 
-    # Determinar si debemos refinar con Manga-OCR:
-    # 1. Si el usuario seleccionó japonés explícitamente.
-    # 2. Si está en 'auto' y se detectaron caracteres CJK / japoneses preliminares.
-    detected_asian = any(contains_cjk_or_japanese(item["text"]) for item in raw_detections)
-    should_use_manga_ocr = is_japanese or (lang_code == "auto" and detected_asian)
+    # Activar Manga-OCR EXCLUSIVAMENTE si:
+    # 1. El usuario seleccionó explícitamente Japonés (ja/jp/manga).
+    # 2. O si en modo 'auto' se detectaron caracteres Kana (Hiragana o Katakana) exclusivos del japonés.
+    # En caso de chino (manhua), inglés o coreano, RapidOCR es el motor óptimo.
+    has_kana = any(contains_japanese_kana(item["text"]) for item in raw_detections)
+    should_use_manga_ocr = is_japanese or (lang_code == "auto" and has_kana)
 
     if should_use_manga_ocr:
         manga_engine = get_manga_ocr()

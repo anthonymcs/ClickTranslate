@@ -18,35 +18,59 @@ logger = logging.getLogger("ClickTranslate.Inpainter")
 def inpaint_balloons_fast(img_bgr: np.ndarray, blocks: List[TextBlock], balloon_mask: np.ndarray) -> np.ndarray:
     """
     Limpia los globos de diálogo directamente en memoria con OpenCV.
-    Asegura que todo el texto anterior quede 100% borrado y el fondo limpio.
+    Borra al 100% todo el texto previo y deja el globo limpio como en un scan profesional.
     """
     clean_img = img_bgr.copy()
     h, w = clean_img.shape[:2]
+    gray = cv2.cvtColor(clean_img, cv2.COLOR_BGR2GRAY)
 
     for block in blocks:
         if block.type != "dialog":
             continue
 
         x1, y1, x2, y2 = block.box
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
+        bw = x2 - x1
+        bh = y2 - y1
 
-        # Margen de seguridad para cubrir completamente las letras
-        pad_x = max(3, int((x2 - x1) * 0.05))
-        pad_y = max(3, int((y2 - y1) * 0.05))
-        bx1, by1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-        bx2, by2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
+        # Margen de seguridad adaptativo alrededor de las letras
+        pad_x = max(6, int(bw * 0.15))
+        pad_y = max(6, int(bh * 0.12))
+        bx1 = max(0, x1 - pad_x)
+        by1 = max(0, y1 - pad_y)
+        bx2 = min(w, x2 + pad_x)
+        by2 = min(h, y2 + pad_y)
 
-        # Si el fondo es uniforme (la inmensa mayoría de mangas y cómics)
+        patch_bgr = clean_img[by1:by2, bx1:bx2]
+        patch_gray = gray[by1:by2, bx1:bx2]
+
+        if patch_bgr.size == 0:
+            continue
+
+        # Si el fondo es uniforme (blanco / claro como la mayoría de globos de cómic)
         if block.is_uniform_bg:
-            cv2.rectangle(clean_img, (bx1, by1), (bx2, by2), block.bg_color, -1)
+            # Detectar y borrar trazos oscuros de las letras anteriores
+            dark_mask = (patch_gray < 190).astype(np.uint8) * 255
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            dilated_text = cv2.dilate(dark_mask, kernel, iterations=1)
+
+            # Rellenar trazos de letras con el color dominante del globo
+            patch_bgr[dilated_text > 0] = block.bg_color
+
+            # Relleno del núcleo central del texto para asegurar limpieza total
+            core_x1 = max(0, x1 - bx1)
+            core_y1 = max(0, y1 - by1)
+            core_x2 = min(bx2 - bx1, x2 - bx1)
+            core_y2 = min(by2 - by1, y2 - by1)
+            cv2.rectangle(patch_bgr, (core_x1, core_y1), (core_x2, core_y2), block.bg_color, -1)
+
+            clean_img[by1:by2, bx1:bx2] = patch_bgr
         else:
-            # Si tiene trama o gradiente leve, usar OpenCV Telea localizado
-            patch_mask = np.zeros((by2 - by1, bx2 - bx1), dtype=np.uint8)
-            patch_mask[:] = 255
-            patch_img = clean_img[by1:by2, bx1:bx2]
-            if patch_img.size > 0:
-                inpainted = cv2.inpaint(patch_img, patch_mask, 3, cv2.INPAINT_TELEA)
+            # Fondo con trama, arte o gradiente: Inpainting Telea localizado
+            text_mask = (patch_gray < 180).astype(np.uint8) * 255
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            dilated = cv2.dilate(text_mask, kernel, iterations=1)
+            if np.count_nonzero(dilated) > 0:
+                inpainted = cv2.inpaint(patch_bgr, dilated, 3, cv2.INPAINT_TELEA)
                 clean_img[by1:by2, bx1:bx2] = inpainted
 
     return clean_img
