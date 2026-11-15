@@ -61,28 +61,43 @@ def translate_text_fast_google(text: str, src_lang: str = "auto", tgt_lang: str 
         }
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=4.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            if data and len(data) > 0 and isinstance(data[0], list):
-                translated_parts = [part[0] for part in data[0] if part and len(part) > 0 and part[0]]
-                return "".join(translated_parts).strip()
-    except Exception as e:
-        logger.warning(f"Error en Google Translate API: {e}")
+    # Intento 1 y 2 con Google Translate API
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=8.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if data and len(data) > 0 and isinstance(data[0], list):
+                    translated_parts = [part[0] for part in data[0] if part and len(part) > 0 and part[0]]
+                    res_str = "".join(translated_parts).strip()
+                    if res_str:
+                        return res_str
+        except Exception as e:
+            logger.warning(f"Intento {attempt + 1} Google Translate API fallo: {e}")
 
-    # Fallback a MyMemory
+    # Fallback inteligente con detección de idioma para evitar error 'auto'
     try:
+        def detect_script(t: str) -> str:
+            if any(0x3040 <= ord(c) <= 0x30FF for c in t):
+                return "ja"
+            if any(0xAC00 <= ord(c) <= 0xD7AF for c in t):
+                return "ko"
+            if any(0x4E00 <= ord(c) <= 0x9FFF for c in t):
+                return "zh-CN"
+            return "en"
+
+        src_resolved = detect_script(text) if src == "auto" else src
         from deep_translator import MyMemoryTranslator
-        src_mm = "en-US" if src == "en" else src
+        src_mm = "en-US" if src_resolved == "en" else src_resolved
         tgt_mm = "es-ES" if tgt == "es" else tgt
         tr = MyMemoryTranslator(source=src_mm, target=tgt_mm)
         res = tr.translate(text)
-        if res:
+        if res and "INVALID" not in res.upper() and "MYMEMORY WARNING" not in res.upper():
             return res.strip()
     except Exception as me:
         logger.warning(f"Error en fallback MyMemory: {me}")
 
-    return None
+    # Si todo falla, mantener el texto original para no mostrar mensajes de error dentro del globo
+    return text
 
 
 async def fetch_available_models(base_url: str = OLLAMA_BASE_URL) -> List[str]:

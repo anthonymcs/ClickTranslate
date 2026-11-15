@@ -22,6 +22,7 @@ import base64
 import asyncio
 import zipfile
 import logging
+import unicodedata
 from typing import Dict, Any, Optional, Tuple
 
 import cv2
@@ -139,23 +140,67 @@ def process_single_image_in_memory(
                     block_type = "sfx"
                 eff_box = (x1, y1, x2, y2)
 
-            # OCR especializado en el recorte
-            extracted_text = ""
-            if manga_engine is not None and crop_bgr.size > 0:
-                try:
-                    crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-                    pil_crop = Image.fromarray(crop_rgb)
-                    extracted_text = manga_engine(pil_crop).strip()
-                except Exception as e:
-                    logger.warning(f"Error Manga-OCR en recorte: {e}")
+            # OCR Inteligente Multi-idioma con enrutamiento automático
+            def contains_kana(txt: str) -> bool:
+                return any((0x3040 <= ord(c) <= 0x309F) or (0x30A0 <= ord(c) <= 0x30FF) for c in txt)
 
-            if not extracted_text and rapid_engine is not None and crop_bgr.size > 0:
-                try:
+            extracted_text = ""
+            if is_japanese:
+                # Si el usuario seleccionó explícitamente Japonés, priorizar Manga-OCR
+                if manga_engine is not None and crop_bgr.size > 0:
+                    try:
+                        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+                        pil_crop = Image.fromarray(crop_rgb)
+                        extracted_text = manga_engine(pil_crop).strip()
+                    except Exception as e:
+                        logger.warning(f"Error Manga-OCR: {e}")
+                if not extracted_text and rapid_engine is not None and crop_bgr.size > 0:
                     r_res, _ = rapid_engine(crop_bgr)
                     if r_res:
                         extracted_text = " ".join([item[1] for item in r_res]).strip()
-                except Exception as e:
-                    logger.warning(f"Error RapidOCR en recorte: {e}")
+            else:
+                # Inglés, coreano, chino o modo 'auto': RapidOCR procesa primero con orden vertical y horizontal
+                if rapid_engine is not None and crop_bgr.size > 0:
+                    try:
+                        r_res, _ = rapid_engine(crop_bgr)
+                        if r_res:
+                            # Agrupar en líneas por proximidad vertical Y (tolerancia 7px)
+                            lines_grouped = []
+                            for item in r_res:
+                                iy = item[0][0][1]
+                                ix = item[0][0][0]
+                                itxt = item[1]
+                                placed = False
+                                for lg in lines_grouped:
+                                    if abs(lg["y"] - iy) <= 7:
+                                        lg["items"].append((ix, itxt))
+                                        placed = True
+                                        break
+                                if not placed:
+                                    lines_grouped.append({"y": iy, "items": [(ix, itxt)]})
+                            lines_grouped.sort(key=lambda l: l["y"])
+                            full_lines = []
+                            for lg in lines_grouped:
+                                lg["items"].sort(key=lambda w: w[0])
+                                full_lines.append(" ".join([w[1] for w in lg["items"]]))
+                            extracted_text = " ".join(full_lines).strip()
+                    except Exception as e:
+                        logger.warning(f"Error RapidOCR: {e}")
+
+                # Si en modo 'auto' no detectó texto latino/chino/coreano, o detectó Kana japonés, probar Manga-OCR
+                if lang_code == "auto" and (not extracted_text or contains_kana(extracted_text)):
+                    if manga_engine is not None and crop_bgr.size > 0:
+                        try:
+                            crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+                            pil_crop = Image.fromarray(crop_rgb)
+                            m_txt = manga_engine(pil_crop).strip()
+                            if m_txt and (contains_kana(m_txt) or not extracted_text):
+                                extracted_text = m_txt
+                        except Exception as e:
+                            logger.warning(f"Error Manga-OCR fallback: {e}")
+
+            # Normalizar NFKC estrictamente para eliminar fullwidth characters (evita cuadrados/tofu)
+            extracted_text = unicodedata.normalize("NFKC", extracted_text).strip()
 
             if not extracted_text:
                 continue
@@ -225,7 +270,7 @@ def process_single_image_in_memory(
 
     for block in blocks:
         if block.id in translations:
-            block.translated_text = translations[block.id]
+            block.translated_text = unicodedata.normalize("NFKC", translations[block.id]).strip()
 
     # 5. Re-tipografía Scanlation profesional (Mayúsculas, centrado, ajuste en globo)
     final_bgr = render_typesetting(cleaned_img, blocks)

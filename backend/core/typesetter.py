@@ -9,6 +9,7 @@ import os
 import glob
 import textwrap
 import logging
+import unicodedata
 from typing import List, Tuple, Optional
 import cv2
 import numpy as np
@@ -102,7 +103,7 @@ def fit_text_in_balloon(
     para que el texto encaje perfectamente en el bounding box del globo.
     """
     # En scanlation profesional de manga/cómics, el diálogo siempre se rotula en MAYÚSCULAS
-    text = text.upper().strip()
+    text = unicodedata.normalize("NFKC", text).upper().strip()
     best_font = None
     best_lines = [text]
     best_w, best_h = box_w, box_h
@@ -144,7 +145,7 @@ def render_typesetting(img_bgr: np.ndarray, blocks: List[TextBlock]) -> np.ndarr
     draw = ImageDraw.Draw(pil_img)
 
     for block in blocks:
-        text = block.translated_text or block.text
+        text = unicodedata.normalize("NFKC", block.translated_text or block.text).strip()
         if not text or not text.strip():
             continue
 
