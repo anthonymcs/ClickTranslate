@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import mascotImg from "../assets/mascot.jpg";
 import {
   Zap,
   Layers,
@@ -101,17 +102,27 @@ export const TopBar: React.FC<TopBarProps> = ({
     <header className="h-16 px-4 border-b border-surfaceBorder bg-surface/90 backdrop-blur-md flex items-center justify-between select-none z-30">
       {/* Logotipo y Modos */}
       <div className="flex items-center gap-6">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
-            <span className="font-bold text-white text-base tracking-tighter">CT</span>
+        <div className="flex items-center gap-3">
+          <div className="relative group cursor-pointer">
+            <div className="absolute -inset-0.5 bg-gradient-to-r from-indigo-500 to-purple-500 rounded-xl blur-xs opacity-75 group-hover:opacity-100 transition duration-300" />
+            <div className="relative w-9 h-9 rounded-xl overflow-hidden border border-indigo-400/50 bg-zinc-950 flex items-center justify-center">
+              <img
+                src={mascotImg}
+                alt="ClickTranslate Mascot"
+                className="w-full h-full object-cover object-center"
+              />
+            </div>
+            <span className="absolute -bottom-1 -right-1 w-3 h-3 bg-emerald-500 border-2 border-zinc-950 rounded-full" />
           </div>
           <div>
             <h1 className="font-bold text-sm tracking-wide text-zinc-100 flex items-center gap-1.5">
               ClickTranslate
+              <span className="text-[10px] font-mono text-indigo-400">「翻訳」</span>
               <span className="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
                 RAM Mode
               </span>
             </h1>
+            <p className="text-[10px] text-zinc-400 leading-none">Manga & Comic AI Translator</p>
           </div>
         </div>
 

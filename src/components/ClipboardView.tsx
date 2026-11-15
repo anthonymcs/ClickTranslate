@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import mascotImg from "../assets/mascot.jpg";
 import {
   Copy,
   Download,
@@ -10,7 +11,9 @@ import {
   Image as ImageIcon,
   Check,
   AlertTriangle,
-  Move
+  Move,
+  BookOpen,
+  Zap
 } from "lucide-react";
 
 interface ClipboardViewProps {
@@ -329,14 +332,35 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
               />
             </div>
           ) : (
-            <div className="flex flex-col items-center text-center text-zinc-500 max-w-xs pointer-events-none">
-              <div className="w-16 h-16 rounded-2xl bg-zinc-900/60 border border-surfaceBorder flex items-center justify-center mb-3">
-                <ImageIcon className="w-8 h-8 text-zinc-600" />
+            <div className="flex flex-col items-center text-center max-w-sm pointer-events-none p-6">
+              <div className="relative mb-4 group">
+                <div className="absolute -inset-1 bg-gradient-to-r from-indigo-500 to-purple-600 rounded-2xl blur-sm opacity-50" />
+                <div className="relative w-24 h-24 rounded-2xl overflow-hidden border border-indigo-400/40 bg-zinc-900 shadow-xl">
+                  <img
+                    src={mascotImg}
+                    alt="ClickTranslate"
+                    className="w-full h-full object-cover"
+                  />
+                  <div className="absolute bottom-1 right-1 bg-black/80 px-1.5 py-0.5 rounded text-[9px] font-bold text-indigo-300">
+                    Ctrl+V
+                  </div>
+                </div>
               </div>
-              <p className="text-sm font-medium text-zinc-300 mb-1">Sin captura activa</p>
-              <p className="text-xs text-zinc-500">
-                Copia cualquier viñeta con <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300">Win+Shift+S</kbd> y pulsa <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300">Ctrl+V</kbd> aquí
+
+              <h3 className="text-base font-bold text-zinc-100 mb-1 flex items-center gap-2">
+                <span>Captura o Pega tu Manga</span>
+              </h3>
+              <p className="text-xs text-zinc-400 mb-4 leading-relaxed">
+                Toma una captura con <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-mono text-[11px]">Win + Shift + S</kbd> y pulsa <kbd className="px-1.5 py-0.5 rounded bg-indigo-900/60 border border-indigo-500/40 text-indigo-300 font-mono text-[11px]">Ctrl + V</kbd> aquí.
               </p>
+
+              {/* Badges de Formatos Soportados */}
+              <div className="flex flex-wrap items-center justify-center gap-1.5 text-[10px] text-zinc-400">
+                <span className="px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">🇯🇵 Manga (RTL)</span>
+                <span className="px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">🇰🇷 Manhwa</span>
+                <span className="px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">🇨🇳 Manhua</span>
+                <span className="px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">🇺🇸 Comics (LTR)</span>
+              </div>
             </div>
           )}
         </div>
@@ -369,14 +393,18 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
               <p className="text-xs text-zinc-500 mt-1">Procesando estrictamente en memoria RAM</p>
             </div>
           ) : (
-            <div className="flex flex-col items-center text-center text-zinc-500 max-w-xs pointer-events-none">
-              <div className="w-16 h-16 rounded-2xl bg-zinc-900/60 border border-surfaceBorder flex items-center justify-center mb-3">
-                <Sparkles className="w-8 h-8 text-zinc-600" />
+            <div className="flex flex-col items-center text-center text-zinc-500 max-w-xs pointer-events-none p-6">
+              <div className="w-16 h-16 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center mb-3 text-indigo-400">
+                <Sparkles className="w-8 h-8" />
               </div>
-              <p className="text-sm font-medium text-zinc-400 mb-1">Esperando imagen</p>
-              <p className="text-xs text-zinc-600">
-                El resultado traducido y re-tipografiado aparecerá aquí automáticamente
+              <p className="text-sm font-semibold text-zinc-200 mb-1">Traducción Re-tipografiada</p>
+              <p className="text-xs text-zinc-400 leading-relaxed">
+                El motor detectará automáticamente globos y onomatopeyas, limpiará el fondo con LaMa y maquetará la traducción en español.
               </p>
+              <div className="mt-4 flex items-center gap-1.5 px-3 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-[10px] text-zinc-400">
+                <Zap className="w-3 h-3 text-indigo-400" />
+                <span>Zero-Persistence RAM: 100% Volátil</span>
+              </div>
             </div>
           )}
         </div>

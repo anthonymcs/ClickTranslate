@@ -2,7 +2,6 @@ Set WshShell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 strPath = fso.GetParentFolderName(WScript.ScriptFullName)
 
-' Ejecuta el lanzador bat en modo visible u oculto según preferencia
-' Si deseas ver los logs de inicio usa 1, si deseas que sea 100% silencioso usa 0.
 WshShell.CurrentDirectory = strPath
-WshShell.Run Chr(34) & strPath & "\Iniciar ClickTranslate.bat" & Chr(34), 1, False
+' Ejecutar PowerShell 100% invisible (0 = SW_HIDE) sin ninguna ventana de terminal
+WshShell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & strPath & "\run.ps1""", 0, False

@@ -1,48 +1,41 @@
-$Host.UI.RawUI.WindowTitle = "ClickTranslate"
 Set-Location $PSScriptRoot
-
-Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host "          ClickTranslate - Iniciando Aplicacion        " -ForegroundColor Cyan
-Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host ""
 
 # 1. Verificar entorno virtual de Python
 $pythonExe = Join-Path $PSScriptRoot "backend\venv\Scripts\python.exe"
 if (-not (Test-Path $pythonExe)) {
-    Write-Host "[1/3] Creando entorno virtual de Python..." -ForegroundColor Yellow
     python -m venv (Join-Path $PSScriptRoot "backend\venv")
-    Write-Host "[1/3] Instalando dependencias de IA..." -ForegroundColor Yellow
     & $pythonExe -m pip install -r (Join-Path $PSScriptRoot "backend\requirements.txt")
-} else {
-    Write-Host "[1/3] Entorno Python detectado correctamente." -ForegroundColor Green
 }
 
 # 2. Verificar dependencias de Node.js
 $nodeModules = Join-Path $PSScriptRoot "node_modules"
+$npmExe = (Get-Command npm -ErrorAction SilentlyContinue)?.Source
+if (-not $npmExe) { $npmExe = "C:\Program Files\nodejs\npm.cmd" }
+
 if (-not (Test-Path $nodeModules)) {
-    Write-Host "[2/3] Instalando modulos de Node.js..." -ForegroundColor Yellow
-    & "C:\Program Files\nodejs\npm.cmd" install
-} else {
-    Write-Host "[2/3] Modulos de interfaz listos." -ForegroundColor Green
+    & $npmExe install
 }
 
-# 3. Comprobar Ollama
-Write-Host "[3/3] Verificando conexion con Ollama local..." -ForegroundColor Gray
+# 3. Comprobar Ollama de forma segura
 try {
-    $ollamaCheck = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -Method Get -TimeoutSec 2 -ErrorAction Stop
-    Write-Host "[3/3] Ollama conectado exitosamente." -ForegroundColor Green
+    $null = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -Method Get -TimeoutSec 1 -ErrorAction Stop
 } catch {
-    Write-Host "[AVISO] Ollama no detectado en puerto 11434. Intentando iniciar servicio..." -ForegroundColor Yellow
-    Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden -ErrorAction SilentlyContinue
+    $ollamaExe = (Get-Command ollama -ErrorAction SilentlyContinue)?.Source
+    if (-not $ollamaExe) {
+        $defaultOllama = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
+        if (Test-Path $defaultOllama) { $ollamaExe = $defaultOllama }
+    }
+    if ($ollamaExe) {
+        Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden -ErrorAction SilentlyContinue
+    }
 }
 
-# 4. Iniciar Backend FastAPI en segundo plano
+# 4. Iniciar Backend FastAPI en segundo plano si no está activo
 $backendRunning = $false
 try {
     $health = Invoke-RestMethod -Uri "http://127.0.0.1:8000/health" -Method Get -TimeoutSec 1 -ErrorAction Stop
     if ($health.status -eq "ok") {
         $backendRunning = $true
-        Write-Host "Backend FastAPI ya esta activo en http://127.0.0.1:8000" -ForegroundColor Green
     }
 } catch {
     $backendRunning = $false
@@ -50,30 +43,21 @@ try {
 
 $backendProc = $null
 if (-not $backendRunning) {
-    Write-Host "Iniciando motor de traduccion en memoria RAM..." -ForegroundColor Cyan
     $backendDir = Join-Path $PSScriptRoot "backend"
     $backendProc = Start-Process -FilePath $pythonExe `
         -ArgumentList "-m uvicorn main:app --app-dir `"$backendDir`" --host 127.0.0.1 --port 8000" `
         -WindowStyle Hidden `
         -PassThru
-    Start-Sleep -Seconds 2
 }
 
-# 5. Iniciar la aplicacion de escritorio
-Write-Host ""
-Write-Host "Abriendo ventana de ClickTranslate..." -ForegroundColor Cyan
-Write-Host "=======================================================" -ForegroundColor Cyan
-
+# 5. Iniciar la aplicación de escritorio
 try {
-    & "C:\Program Files\nodejs\npm.cmd" run tauri dev
+    & $npmExe run tauri dev
 } finally {
-    # 6. Al salir, limpiar el backend si lo iniciamos nosotros
-    Write-Host ""
-    Write-Host "Cerrando backend y liberando memoria RAM..." -ForegroundColor Gray
+    # 6. Al salir, cerrar el backend y liberar toda la memoria RAM
     if ($backendProc -and -not $backendProc.HasExited) {
         Stop-Process -Id $backendProc.Id -Force -ErrorAction SilentlyContinue
     }
-    # Asegurar que ningun uvicorn del venv quede huerfano
     Get-Process -Name python -ErrorAction SilentlyContinue | Where-Object {
         $_.Path -like "*ClickTranslate\backend\venv*"
     } | Stop-Process -Force -ErrorAction SilentlyContinue

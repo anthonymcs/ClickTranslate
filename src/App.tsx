@@ -2,10 +2,12 @@ import React, { useState, useEffect, useCallback } from "react";
 import { TopBar, AppMode } from "./components/TopBar";
 import { ClipboardView } from "./components/ClipboardView";
 import { BatchZipView } from "./components/BatchZipView";
+import { SplashScreen } from "./components/SplashScreen";
 import { useMemoryCleanup } from "./hooks/useMemoryCleanup";
-import { Sparkles, CheckCircle2 } from "lucide-react";
+import { CheckCircle2 } from "lucide-react";
 
 export function App() {
+  const [isLoaded, setIsLoaded] = useState(false);
   const [currentMode, setCurrentMode] = useState<AppMode>("quick");
   const [sourceLang, setSourceLang] = useState<string>("auto");
   const [selectedModel, setSelectedModel] = useState<string>("qwen2.5:7b");
@@ -33,7 +35,10 @@ export function App() {
   }, [handleClearMemory]);
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-background text-zinc-100 select-none overflow-hidden font-sans">
+    <div className="flex flex-col h-screen w-screen bg-[#090b10] text-zinc-100 select-none overflow-hidden font-sans">
+      {/* Pantalla de Carga Anime / Splash Screen */}
+      {!isLoaded && <SplashScreen onLoaded={() => setIsLoaded(true)} />}
+
       {/* Barra de Control Superior */}
       <TopBar
         currentMode={currentMode}

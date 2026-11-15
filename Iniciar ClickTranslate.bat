@@ -1,3 +1,3 @@
 @echo off
-cd /d "%~dp0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1"
+start "" wscript.exe "%~dp0ClickTranslate.vbs"
+exit
