@@ -165,12 +165,24 @@ def run_ocr(img_bgr: np.ndarray, raw_lang: str = "auto") -> List[Tuple[Tuple[int
     # Agrupar líneas en globos de diálogo coherentes
     grouped_results = group_text_boxes(raw_detections, img_shape=(h, w))
 
-    # Si el idioma es japonés y tenemos Manga-OCR, re-transcribir con Manga-OCR para máxima precisión
-    if is_japanese:
+    def contains_cjk_or_japanese(txt: str) -> bool:
+        for ch in txt:
+            code = ord(ch)
+            if (0x3040 <= code <= 0x309F) or (0x30A0 <= code <= 0x30FF) or (0x4E00 <= code <= 0x9FFF):
+                return True
+        return False
+
+    # Determinar si debemos refinar con Manga-OCR:
+    # 1. Si el usuario seleccionó japonés explícitamente.
+    # 2. Si está en 'auto' y se detectaron caracteres CJK / japoneses preliminares.
+    detected_asian = any(contains_cjk_or_japanese(item["text"]) for item in raw_detections)
+    should_use_manga_ocr = is_japanese or (lang_code == "auto" and detected_asian)
+
+    if should_use_manga_ocr:
         manga_engine = get_manga_ocr()
         if manga_engine is not None:
             refined_results = []
-            for box, _ in grouped_results:
+            for box, current_text in grouped_results:
                 x1, y1, x2, y2 = box
                 crop_bgr = img_bgr[y1:y2, x1:x2]
                 if crop_bgr.size > 0:
@@ -181,9 +193,9 @@ def run_ocr(img_bgr: np.ndarray, raw_lang: str = "auto") -> List[Tuple[Tuple[int
                         if manga_text:
                             refined_results.append((box, manga_text))
                         else:
-                            refined_results.append((box, _))
+                            refined_results.append((box, current_text))
                     except Exception:
-                        refined_results.append((box, _))
+                        refined_results.append((box, current_text))
             if refined_results:
                 return refined_results
 

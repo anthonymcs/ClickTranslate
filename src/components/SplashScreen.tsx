@@ -36,7 +36,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onLoaded }) => {
     // Comprobación continua del estado del backend FastAPI
     const checkBackend = async () => {
       let isHealthy = false;
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 35; i++) {
         try {
           const res = await fetch("http://127.0.0.1:8000/health", { method: "GET" });
           if (res.ok) {
@@ -64,7 +64,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onLoaded }) => {
               if (isMounted) onLoaded();
             }, 500);
           }
-        }, 400);
+        }, 300);
       }
     };
 

@@ -47,4 +47,6 @@ Thumbs.db
 desktop.ini
 *.tmp
 *.exe
+*.log
+backend/*.log
 

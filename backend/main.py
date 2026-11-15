@@ -6,6 +6,15 @@ Optimizado para traducción instantánea multi-idioma (esquema Google Translate 
 
 import io
 import os
+import sys
+
+# Configurar salida estándar en UTF-8 en Windows para evitar UnicodeEncodeError con kanjis/acentos
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import gc
 import uuid
 import json

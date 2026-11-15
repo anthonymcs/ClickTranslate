@@ -56,20 +56,72 @@ fn spawn_backend_if_needed() -> Option<Child> {
 
     for python_path in &candidates {
         if python_path.exists() {
-            println!("[Tauri] Iniciando backend FastAPI automáticamente: {:?}", python_path);
+            println!("[Tauri] Iniciando backend FastAPI automáticamente con {:?}", python_path);
             let mut cmd = Command::new(python_path);
             cmd.args(["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"]);
 
-            if let Some(parent) = python_path.parent().and_then(|p| p.parent()) {
-                cmd.current_dir(parent);
+            // Localizar el directorio que contiene 'main.py' subiendo en la jerarquía
+            let mut backend_dir = None;
+            let mut curr = python_path.parent();
+            while let Some(dir) = curr {
+                if dir.join("main.py").exists() {
+                    backend_dir = Some(dir.to_path_buf());
+                    break;
+                }
+                curr = dir.parent();
+            }
+
+            if backend_dir.is_none() {
+                if let Ok(exe_path) = std::env::current_exe() {
+                    if let Some(exe_dir) = exe_path.parent() {
+                        let candidate_main = exe_dir.join("backend").join("main.py");
+                        if candidate_main.exists() {
+                            backend_dir = Some(exe_dir.join("backend"));
+                        }
+                    }
+                }
+            }
+
+            if backend_dir.is_none() && PathBuf::from("backend/main.py").exists() {
+                backend_dir = Some(PathBuf::from("backend"));
+            }
+
+            if let Some(ref dir) = backend_dir {
+                println!("[Tauri] Directorio de ejecución del backend: {:?}", dir);
+                cmd.current_dir(dir);
+                cmd.env("PYTHONPATH", dir);
+
+                // Redirigir stdout y stderr a backend.log para registro completo
+                if let Ok(log_file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(dir.join("backend.log"))
+                {
+                    if let Ok(err_clone) = log_file.try_clone() {
+                        cmd.stdout(log_file);
+                        cmd.stderr(err_clone);
+                    }
+                }
             }
 
             #[cfg(target_os = "windows")]
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW (oculta la ventana negra en Windows)
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW (sin ventana de terminal)
 
             match cmd.spawn() {
                 Ok(child) => {
-                    println!("[Tauri] Backend iniciado con PID {}", child.id());
+                    let pid = child.id();
+                    println!("[Tauri] Backend FastAPI iniciado con PID {}", pid);
+
+                    // Esperar hasta 6 segundos a que el servidor FastAPI esté escuchando
+                    for _ in 0..30 {
+                        if std::net::TcpStream::connect("127.0.0.1:8000").is_ok() {
+                            println!("[Tauri] ¡Conexión con FastAPI en http://127.0.0.1:8000 confirmada!");
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+
                     return Some(child);
                 }
                 Err(err) => {
@@ -107,7 +159,15 @@ pub fn run() {
                             child_opt = lock.take();
                         }
                         if let Some(mut child) = child_opt {
-                            println!("[Tauri] Cerrando proceso de backend...");
+                            println!("[Tauri] Cerrando proceso de backend PID {}...", child.id());
+                            #[cfg(target_os = "windows")]
+                            {
+                                let pid_str = child.id().to_string();
+                                let mut kill_cmd = Command::new("taskkill");
+                                kill_cmd.args(["/F", "/T", "/PID", &pid_str]);
+                                kill_cmd.creation_flags(0x08000000);
+                                let _ = kill_cmd.status();
+                            }
                             let _ = child.kill();
                         }
                     }

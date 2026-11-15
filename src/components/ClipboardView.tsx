@@ -10,7 +10,8 @@ import {
   ClipboardPaste,
   Check,
   AlertTriangle,
-  Zap
+  Zap,
+  RefreshCw
 } from "lucide-react";
 
 interface ClipboardViewProps {
@@ -103,7 +104,12 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
         clearTimeout(p3);
         console.error("Error al traducir imagen:", err);
         setIsTranslating(false);
-        setErrorMessage(err.message || "Ocurrió un error al procesar la imagen en el backend.");
+        const rawMsg = err?.message || "";
+        if (rawMsg.includes("Failed to fetch") || rawMsg.includes("NetworkError")) {
+          setErrorMessage("No se pudo conectar con el motor local (puerto 8000). Esperando al servidor...");
+        } else {
+          setErrorMessage(rawMsg || "Ocurrió un error al procesar la imagen en el backend.");
+        }
       }
     },
     [sourceLang, targetLang, selectedModel, createManagedUrl, revokeManagedUrl, originalUrl, translatedUrl]
@@ -224,9 +230,18 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
               <span className="font-mono text-xs text-cyan-300 font-bold">{progressPercent}%</span>
             </div>
           ) : errorMessage ? (
-            <div className="flex items-center gap-1.5 text-rose-400 font-medium">
-              <AlertTriangle className="w-3.5 h-3.5" />
+            <div className="flex items-center gap-2 text-rose-400 font-medium">
+              <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
               <span>{errorMessage}</span>
+              {originalBlob && (
+                <button
+                  onClick={() => processImageBlob(originalBlob)}
+                  className="px-2 py-0.5 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 font-semibold text-[11px] transition-colors flex items-center gap-1 cursor-pointer"
+                >
+                  <RefreshCw className="w-2.5 h-2.5" />
+                  <span>Reintentar</span>
+                </button>
+              )}
             </div>
           ) : translatedUrl ? (
             <div className="flex items-center gap-1.5 text-emerald-400 font-medium">
@@ -395,6 +410,23 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
                 />
               </div>
               <p className="text-[11px] text-zinc-400 mt-1">Limpieza visual e inpainting en RAM</p>
+            </div>
+          ) : errorMessage && originalBlob ? (
+            <div className="flex flex-col items-center text-center max-w-sm p-6 bg-rose-950/20 border border-rose-500/30 rounded-2xl shadow-xl">
+              <div className="w-14 h-14 rounded-full bg-rose-500/20 border border-rose-500/30 flex items-center justify-center mb-3 text-rose-400">
+                <AlertTriangle className="w-7 h-7" />
+              </div>
+              <p className="text-sm font-bold text-rose-200 mb-1">Error de conexión / traducción</p>
+              <p className="text-xs text-rose-300/80 mb-4 leading-relaxed">
+                {errorMessage}
+              </p>
+              <button
+                onClick={() => processImageBlob(originalBlob)}
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-semibold text-xs shadow-lg shadow-indigo-500/25 transition-all flex items-center gap-2 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Reintentar Traducción</span>
+              </button>
             </div>
           ) : (
             <div className="flex flex-col items-center text-center text-zinc-500 max-w-xs pointer-events-none p-6">
