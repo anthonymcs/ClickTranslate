@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permisos principales de ClickTranslate",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "clipboard-manager:default"
+  ]
+}
