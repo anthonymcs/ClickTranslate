@@ -74,7 +74,26 @@ ClickTranslate/
 
 ---
 
-## 🚀 Instalación y Puesta en Marcha
+## ⚡ Inicio Rápido con 1 Solo Clic (Recomendado)
+
+¡No necesitas abrir consolas ni escribir comandos manualmente cada vez!
+
+1. **Desde tu Escritorio:**
+   * Haz doble clic en el acceso directo **`ClickTranslate`** creado en tu Escritorio de Windows.
+2. **O desde la carpeta del proyecto:**
+   * Haz doble clic en **`Iniciar ClickTranslate.bat`** (o en `ClickTranslate.vbs` para modo silencioso).
+
+Este lanzador automático se encarga de:
+* Iniciar Ollama en segundo plano (si aún no está activo).
+* Levantar el servidor FastAPI sin ventanas molestas.
+* Abrir la aplicación de escritorio de inmediato.
+* Detener el backend y liberar toda la memoria RAM en cuanto cierras la aplicación.
+
+Si deseas recrear el acceso directo en el Escritorio en cualquier momento, simplemente ejecuta `Crear Acceso Directo en Escritorio.bat`.
+
+---
+
+## 🚀 Instalación Manual (Opcional)
 
 ### 1. Clonar el Repositorio
 
