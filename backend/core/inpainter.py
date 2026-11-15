@@ -46,14 +46,15 @@ def inpaint_balloons_fast(img_bgr: np.ndarray, blocks: List[TextBlock], balloon_
         if patch_bgr.size == 0:
             continue
 
-        # Si el fondo es uniforme (blanco / claro como la mayoría de globos de cómic)
-        if block.is_uniform_bg:
-            # Detectar y borrar trazos oscuros de las letras anteriores
-            dark_mask = (patch_gray < 190).astype(np.uint8) * 255
+        # Si el fondo del globo es claro (la inmensa mayoría de globos de diálogo en cómics/mangas)
+        bg_brightness = sum(block.bg_color) / 3.0
+        if bg_brightness > 175 or block.is_uniform_bg:
+            # Detectar y borrar trazos oscuros de las letras (< 205)
+            dark_mask = (patch_gray < 205).astype(np.uint8) * 255
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             dilated_text = cv2.dilate(dark_mask, kernel, iterations=1)
 
-            # Rellenar trazos de letras con el color dominante del globo
+            # Rellenar trazos de letras con el color dominante del globo (blanco)
             patch_bgr[dilated_text > 0] = block.bg_color
 
             # Relleno del núcleo central del texto para asegurar limpieza total

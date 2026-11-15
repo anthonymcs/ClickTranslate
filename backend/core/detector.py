@@ -74,7 +74,9 @@ def get_dominant_bg_color(img_bgr: np.ndarray, box: Tuple[int, int, int, int]) -
 
     var = np.mean(np.var(border, axis=0))
     median_color = np.median(border, axis=0).astype(int)
-    is_uniform = var < 450.0  # Umbral de varianza para fondos lisos/globos
+    # En cómics y mangas, si el fondo es claro (> 175) o la varianza es baja, es un globo uniforme
+    is_bright = float(np.mean(median_color)) > 175.0
+    is_uniform = is_bright or (var < 450.0)
     return (int(median_color[0]), int(median_color[1]), int(median_color[2])), is_uniform
 
 

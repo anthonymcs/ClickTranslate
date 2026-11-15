@@ -31,10 +31,17 @@ fn spawn_ollama_if_needed() {
 }
 
 fn spawn_backend_if_needed() -> Option<Child> {
-    // Verificar si el backend ya está activo en http://127.0.0.1:8000
-    if std::net::TcpStream::connect("127.0.0.1:8000").is_ok() {
-        println!("[Tauri] Backend FastAPI ya detectado en http://127.0.0.1:8000");
-        return None;
+    // En Windows, si existe un proceso previo en el puerto 8000, reiniciarlo para asegurar backend fresco
+    #[cfg(target_os = "windows")]
+    {
+        if std::net::TcpStream::connect("127.0.0.1:8000").is_ok() {
+            println!("[Tauri] Proceso previo detectado en puerto 8000. Reiniciando backend limpio...");
+            let _ = Command::new("powershell")
+                .args(["-NoProfile", "-Command", "Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"])
+                .creation_flags(0x08000000)
+                .status();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
     }
 
     // Buscar el ejecutable de Python del venv de forma robusta

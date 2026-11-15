@@ -152,21 +152,32 @@ def run_ocr(img_bgr: np.ndarray, raw_lang: str = "auto") -> List[Tuple[Tuple[int
     lang_code = (raw_lang or "auto").lower().strip()
     is_japanese = lang_code in ["ja", "jp", "japanese", "japonés", "japones"]
 
+    # Escalado adaptativo si la imagen es de baja resolución (< 1100px) para máxima precisión en viñetas
+    scale_factor = 1.0
+    max_dim = max(h, w)
+    if max_dim < 1100:
+        scale_factor = min(3.0, 1200.0 / max(1, max_dim))
+        detect_img = cv2.resize(img_bgr, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
+    else:
+        detect_img = img_bgr
+
+    dh, dw = detect_img.shape[:2]
     raw_detections = []
     try:
-        ocr_result, elapse = rapid_engine(img_bgr)
+        ocr_result, elapse = rapid_engine(detect_img)
         if ocr_result:
             for item in ocr_result:
-                pts = np.array(item[0], dtype=np.int32)
+                pts = np.array(item[0], dtype=np.float32)
                 text = item[1].strip()
                 score = float(item[2])
 
-                x1 = max(0, int(pts[:, 0].min()))
-                y1 = max(0, int(pts[:, 1].min()))
-                x2 = min(w, int(pts[:, 0].max()))
-                y2 = min(h, int(pts[:, 1].max()))
+                # Mapear coordenadas de vuelta a la resolución original
+                x1 = max(0, int(pts[:, 0].min() / scale_factor))
+                y1 = max(0, int(pts[:, 1].min() / scale_factor))
+                x2 = min(w, int(pts[:, 0].max() / scale_factor))
+                y2 = min(h, int(pts[:, 1].max() / scale_factor))
 
-                if x2 - x1 < 6 or y2 - y1 < 6:
+                if x2 - x1 < 5 or y2 - y1 < 5:
                     continue
 
                 raw_detections.append({
