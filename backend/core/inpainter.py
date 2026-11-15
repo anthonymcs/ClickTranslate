@@ -49,10 +49,10 @@ def inpaint_balloons_fast(img_bgr: np.ndarray, blocks: List[TextBlock], balloon_
         # Si el fondo del globo es claro (la inmensa mayoría de globos de diálogo en cómics/mangas)
         bg_brightness = sum(block.bg_color) / 3.0
         if bg_brightness > 175 or block.is_uniform_bg:
-            # Detectar y borrar trazos oscuros de las letras (< 205) sin alterar los bordes del globo
-            dark_mask = (patch_gray < 205).astype(np.uint8) * 255
+            # Detectar y borrar trazos oscuros de las letras (< 215 con dilatación de 2 iteraciones) sin alterar los bordes del globo
+            dark_mask = (patch_gray < 215).astype(np.uint8) * 255
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            dilated_text = cv2.dilate(dark_mask, kernel, iterations=1)
+            dilated_text = cv2.dilate(dark_mask, kernel, iterations=2)
 
             # Rellenar exclusivamente los trazos de letras con el color dominante del globo (blanco)
             # NUNCA usar cv2.rectangle sólido para no romper contornos ni viñetas
@@ -61,9 +61,9 @@ def inpaint_balloons_fast(img_bgr: np.ndarray, blocks: List[TextBlock], balloon_
             clean_img[by1:by2, bx1:bx2] = patch_bgr
         else:
             # Fondo con trama, arte o gradiente: Inpainting Telea localizado
-            text_mask = (patch_gray < 180).astype(np.uint8) * 255
+            text_mask = (patch_gray < 185).astype(np.uint8) * 255
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            dilated = cv2.dilate(text_mask, kernel, iterations=1)
+            dilated = cv2.dilate(text_mask, kernel, iterations=2)
             if np.count_nonzero(dilated) > 0:
                 inpainted = cv2.inpaint(patch_bgr, dilated, 3, cv2.INPAINT_TELEA)
                 clean_img[by1:by2, bx1:bx2] = inpainted

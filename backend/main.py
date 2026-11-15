@@ -15,6 +15,10 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+
+# Evitar consultas de red lentas a Hugging Face en cada llamada de OCR
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 import gc
 import uuid
 import json
@@ -94,7 +98,7 @@ def process_single_image_in_memory(
 
     if comic_blocks:
         logger.info(f"ComicDetector identificó {len(comic_blocks)} regiones en la página.")
-        manga_engine = get_manga_ocr() if (is_japanese or lang_code == "auto") else None
+        manga_engine = get_manga_ocr() if is_japanese else None
         rapid_engine = get_rapid_ocr()
 
         reading_dir = "rtl" if lang_code in ["ja", "jp", "auto"] else "ltr"
@@ -187,14 +191,16 @@ def process_single_image_in_memory(
                     except Exception as e:
                         logger.warning(f"Error RapidOCR: {e}")
 
-                # Si en modo 'auto' no detectó texto latino/chino/coreano, o detectó Kana japonés, probar Manga-OCR
-                if lang_code == "auto" and (not extracted_text or contains_kana(extracted_text)):
+                # Si en modo 'auto' el texto extraído contiene Kana japonés, o si es japonés explícito, usar Manga-OCR
+                if (is_japanese or (lang_code == "auto" and contains_kana(extracted_text))):
+                    if manga_engine is None:
+                        manga_engine = get_manga_ocr()
                     if manga_engine is not None and crop_bgr.size > 0:
                         try:
                             crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
                             pil_crop = Image.fromarray(crop_rgb)
                             m_txt = manga_engine(pil_crop).strip()
-                            if m_txt and (contains_kana(m_txt) or not extracted_text):
+                            if m_txt and contains_kana(m_txt):
                                 extracted_text = m_txt
                         except Exception as e:
                             logger.warning(f"Error Manga-OCR fallback: {e}")
@@ -205,28 +211,29 @@ def process_single_image_in_memory(
             if not extracted_text:
                 continue
 
-            # Inpainting seguro: limpiar exclusivamente la región de texto original sin tocar bordes
+            # Inpainting profesional TranslateManga: limpieza impecable de globos sin residuos de texto
             if block_type == "dialog":
                 p_gray = gray[y1:y2, x1:x2]
                 bg_bright = sum(dom_color) / 3.0
                 if bg_bright > 175 or is_uniform:
-                    t_mask = (p_gray < 205).astype(np.uint8)
+                    # Rango ampliado a 215 y 2 iteraciones de dilatación para eliminar halos grises anti-alias
+                    t_mask = (p_gray < 215).astype(np.uint8)
                     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-                    dilated = cv2.dilate(t_mask, kernel, iterations=1)
+                    dilated = cv2.dilate(t_mask, kernel, iterations=2)
                     target_color = (255, 255, 255) if bg_bright > 185 else dom_color
                     cleaned_img[y1:y2, x1:x2][dilated > 0] = target_color
                 else:
                     sub_m = text_mask[y1:y2, x1:x2]
                     if np.count_nonzero(sub_m) > 0:
                         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-                        dilated = cv2.dilate(sub_m, kernel, iterations=1)
+                        dilated = cv2.dilate(sub_m, kernel, iterations=2)
                         inpainted = cv2.inpaint(cleaned_img[y1:y2, x1:x2], dilated, 3, cv2.INPAINT_TELEA)
                         cleaned_img[y1:y2, x1:x2] = inpainted
             else:
                 sub_m = text_mask[y1:y2, x1:x2]
                 if np.count_nonzero(sub_m) > 0:
                     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-                    dilated = cv2.dilate(sub_m, kernel, iterations=1)
+                    dilated = cv2.dilate(sub_m, kernel, iterations=2)
                     inpainted = cv2.inpaint(cleaned_img[y1:y2, x1:x2], dilated, 3, cv2.INPAINT_TELEA)
                     cleaned_img[y1:y2, x1:x2] = inpainted
 

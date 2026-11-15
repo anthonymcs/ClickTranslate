@@ -155,7 +155,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
-            <span>Capítulo (ZIP / CBZ)</span>
+            <span>Capítulo & Lector (Imágenes / ZIP)</span>
           </button>
         </div>
       </div>

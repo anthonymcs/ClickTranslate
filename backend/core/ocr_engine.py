@@ -12,6 +12,10 @@ import numpy as np
 import cv2
 from PIL import Image
 
+# Configurar HuggingFace en modo Offline para evitar llamadas de red lentas en cada inferencia
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 logger = logging.getLogger("ClickTranslate.OCR")
 
 _rapid_ocr_instance = None

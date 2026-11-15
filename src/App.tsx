@@ -72,6 +72,8 @@ export function App() {
             targetLang={targetLang}
             selectedModel={selectedModel}
             outputFormat={outputFormat}
+            createManagedUrl={createManagedUrl}
+            revokeManagedUrl={revokeManagedUrl}
             onClearMemoryTrigger={handleClearMemory}
           />
         )}
