@@ -7,10 +7,14 @@ if (-not (Test-Path $pythonExe)) {
     & $pythonExe -m pip install -r (Join-Path $PSScriptRoot "backend\requirements.txt")
 }
 
-# 2. Verificar dependencias de Node.js
+# 2. Verificar dependencias de Node.js y npm
 $nodeModules = Join-Path $PSScriptRoot "node_modules"
-$npmExe = (Get-Command npm -ErrorAction SilentlyContinue)?.Source
-if (-not $npmExe) { $npmExe = "C:\Program Files\nodejs\npm.cmd" }
+$cmdNpm = Get-Command npm -ErrorAction SilentlyContinue
+if ($cmdNpm) { 
+    $npmExe = $cmdNpm.Source 
+} else { 
+    $npmExe = "C:\Program Files\nodejs\npm.cmd" 
+}
 
 if (-not (Test-Path $nodeModules)) {
     & $npmExe install
@@ -20,8 +24,11 @@ if (-not (Test-Path $nodeModules)) {
 try {
     $null = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -Method Get -TimeoutSec 1 -ErrorAction Stop
 } catch {
-    $ollamaExe = (Get-Command ollama -ErrorAction SilentlyContinue)?.Source
-    if (-not $ollamaExe) {
+    $ollamaExe = $null
+    $cmdOllama = Get-Command ollama -ErrorAction SilentlyContinue
+    if ($cmdOllama) {
+        $ollamaExe = $cmdOllama.Source
+    } else {
         $defaultOllama = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
         if (Test-Path $defaultOllama) { $ollamaExe = $defaultOllama }
     }
@@ -51,8 +58,19 @@ if (-not $backendRunning) {
 }
 
 # 5. Iniciar la aplicación de escritorio
+# Si existe el ejecutable compilado nativo, lanzarlo directamente para apertura instantánea
+$nativeExe = Join-Path $PSScriptRoot "src-tauri\target\debug\clicktranslate.exe"
+$releaseExe = Join-Path $PSScriptRoot "src-tauri\target\release\clicktranslate.exe"
+
 try {
-    & $npmExe run tauri dev
+    if (Test-Path $releaseExe) {
+        & $releaseExe
+    } elseif (Test-Path $nativeExe) {
+        # Si ya existe el ejecutable pero necesitamos el dev server o frontend listo
+        & $npmExe run tauri dev
+    } else {
+        & $npmExe run tauri dev
+    }
 } finally {
     # 6. Al salir, cerrar el backend y liberar toda la memoria RAM
     if ($backendProc -and -not $backendProc.HasExited) {

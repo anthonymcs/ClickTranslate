@@ -3,16 +3,15 @@ $CurrentDir = Split-Path -Parent $PSCommandPath
 if (-not $CurrentDir) { $CurrentDir = Get-Location }
 
 $ShortcutPath = Join-Path $DesktopPath "ClickTranslate.lnk"
-$VbsLauncher = Join-Path $CurrentDir "ClickTranslate.vbs"
+$TargetFile = Join-Path $CurrentDir "ClickTranslate.exe"
 $IconFile = Join-Path $CurrentDir "src-tauri\icons\icon.ico"
 
 $WshShell = New-Object -ComObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
-$Shortcut.TargetPath = "wscript.exe"
-$Shortcut.Arguments = "`"$VbsLauncher`""
+$Shortcut.TargetPath = "$TargetFile"
 $Shortcut.WorkingDirectory = "$CurrentDir"
 $Shortcut.IconLocation = "$IconFile,0"
 $Shortcut.Description = "ClickTranslate - Traductor visual para cómics y mangas"
 $Shortcut.Save()
 
-Write-Host "Acceso directo silencioso creado exitosamente en: $ShortcutPath"
+Write-Host "Acceso directo nativo creado exitosamente en: $ShortcutPath"
