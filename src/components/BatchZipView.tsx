@@ -14,6 +14,7 @@ import {
 
 interface BatchZipViewProps {
   sourceLang: string;
+  targetLang: string;
   selectedModel: string;
   outputFormat: "zip" | "cbz";
   onClearMemoryTrigger: () => void;
@@ -31,6 +32,7 @@ interface BatchProgress {
 
 export const BatchZipView: React.FC<BatchZipViewProps> = ({
   sourceLang,
+  targetLang,
   selectedModel,
   outputFormat,
 }) => {
@@ -88,6 +90,7 @@ export const BatchZipView: React.FC<BatchZipViewProps> = ({
       const formData = new FormData();
       formData.append("file", selectedFile);
       formData.append("src_lang", sourceLang);
+      formData.append("tgt_lang", targetLang);
       formData.append("model_name", selectedModel);
       formData.append("output_format", outputFormat);
 

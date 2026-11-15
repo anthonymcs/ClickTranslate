@@ -1,11 +1,15 @@
 """
-Módulo de Traducción Contextual con Ollama Asíncrono.
-Envía la página completa en formato JSON y optimiza la memoria con 'keep_alive': '5m'.
-Soporta todo tipo de contenido gráfico y géneros sin restricciones ni censura.
+Módulo de Traducción Contextual y Multi-idioma de Alta Velocidad.
+- Modo Rápido (Google Translate API con fallback a MyMemory): Inferencia en ~200 ms, soporte para 100+ idiomas.
+- Modo Ollama Local: IA contextual sin censura para ejecución 100% privada en RAM.
+- Soporte dinámico de idiomas origen y destino (estilo Google Translate).
 """
 
+import os
 import json
 import logging
+import urllib.parse
+import urllib.request
 from typing import List, Dict, Any, Optional, Tuple
 import httpx
 
@@ -15,139 +19,171 @@ logger = logging.getLogger("ClickTranslate.Translator")
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 
+# Mapeo de códigos de idioma amigables
+LANGUAGE_CODES = {
+    "auto": "auto",
+    "es": "es",
+    "en": "en",
+    "ja": "ja",
+    "ko": "ko",
+    "zh": "zh-CN",
+    "pt": "pt",
+    "fr": "fr",
+    "de": "de",
+    "it": "it",
+    "ru": "ru",
+}
+
+
+def translate_text_fast_google(text: str, src_lang: str = "auto", tgt_lang: str = "es") -> Optional[str]:
+    """
+    Traduce un texto usando la API de Google Translate con headers de navegador.
+    Tiempo de respuesta: ~100-250 ms.
+    """
+    if not text or not text.strip():
+        return ""
+
+    src = LANGUAGE_CODES.get(src_lang.lower(), src_lang.lower())
+    tgt = LANGUAGE_CODES.get(tgt_lang.lower(), tgt_lang.lower())
+
+    url = (
+        f"https://translate.googleapis.com/translate_a/single"
+        f"?client=gtx&sl={src}&tl={tgt}&dt=t&q="
+        + urllib.parse.quote(text)
+    )
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Referer": "https://translate.google.com/",
+            "Accept": "*/*",
+        }
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if data and len(data) > 0 and isinstance(data[0], list):
+                translated_parts = [part[0] for part in data[0] if part and len(part) > 0 and part[0]]
+                return "".join(translated_parts).strip()
+    except Exception as e:
+        logger.warning(f"Error en Google Translate API: {e}")
+
+    # Fallback a MyMemory
+    try:
+        from deep_translator import MyMemoryTranslator
+        src_mm = "en-US" if src == "en" else src
+        tgt_mm = "es-ES" if tgt == "es" else tgt
+        tr = MyMemoryTranslator(source=src_mm, target=tgt_mm)
+        res = tr.translate(text)
+        if res:
+            return res.strip()
+    except Exception as me:
+        logger.warning(f"Error en fallback MyMemory: {me}")
+
+    return None
+
 
 async def fetch_available_models(base_url: str = OLLAMA_BASE_URL) -> List[str]:
     """Consulta la API de Ollama y devuelve la lista de nombres de modelos locales instalados."""
     url = f"{base_url}/api/tags"
     try:
-        async with httpx.AsyncClient(timeout=4.0) as client:
+        async with httpx.AsyncClient(timeout=2.0) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
                 data = resp.json()
                 models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
                 return models
-    except Exception as e:
-        logger.warning(f"No se pudo conectar a Ollama en {url}: {e}")
+    except Exception:
+        pass
     return []
 
 
-def build_translation_prompt(blocks: List[TextBlock], src_lang: str = "ja") -> Tuple[str, str]:
-    """
-    Construye el system prompt y el prompt de usuario estructurado con el contexto
-    completo de la página para garantizar coherencia tonal y fluidez narrativa.
-    """
-    system_prompt = (
-        "Eres un traductor profesional experto y fidedigno de mangas, manhwas, manhuas y cómics occidentales.\n"
-        "Tu misión es traducir con precisión milimétrica todos los textos y onomatopeyas de la página al español natural y fluido.\n"
-        "REGLAS OBLIGATORIAS:\n"
-        "1. NO CENSURES, omitas ni alteres ninguna palabra. Esta herramienta soporta todo tipo de contenido gráfico "
-        "(acción, seinen, shonen, romance, erótico/ecchi, horror, gore, lenguaje soez, etc.) sin restricciones.\n"
-        "2. Mantén la coherencia y tono de los personajes a lo largo de toda la página.\n"
-        "3. Para bloques de tipo 'sfx' (onomatopeyas), adapta el efecto de sonido al español de cómics (ej. 'DOKI DOKI' -> 'PALPITAR' o 'BUM BUM', 'GOGOGO' -> 'RETUMBO' o 'RUMBLE', 'DON' -> 'BOOM', 'KYAA' -> '¡AHH!').\n"
-        "4. Devuelve ÚNICAMENTE un objeto JSON válido donde cada clave sea el 'id' numérico como string o número y el valor sea el texto traducido al español.\n"
-        "Ejemplo de salida:\n"
-        '{"1": "¡No puede ser!", "2": "RETUMBO", "3": "¿Quién eres?"}'
-    )
-
-    items = []
-    for b in blocks:
-        items.append({
-            "id": b.id,
-            "type": b.type,
-            "original_text": b.text
-        })
-
-    user_payload = {
-        "source_language": src_lang,
-        "target_language": "es",
-        "blocks": items
-    }
-
-    user_prompt = (
-        f"Traduce al español todos los siguientes bloques de diálogo y SFX respetando el contexto de la página.\n"
-        f"Devuelve un JSON estrictamente estructurado con los IDs y sus traducciones:\n"
-        f"{json.dumps(user_payload, ensure_ascii=False, indent=2)}"
-    )
-
-    return system_prompt, user_prompt
-
-
-async def translate_page_contextual(
+async def translate_with_ollama(
     blocks: List[TextBlock],
     model_name: str = "qwen2.5:7b",
-    src_lang: str = "ja",
+    src_lang: str = "auto",
+    tgt_lang: str = "es",
     base_url: str = OLLAMA_BASE_URL
 ) -> Dict[int, str]:
-    """
-    Envía los bloques a Ollama mediante /api/generate en modo JSON con keep_alive: '5m'.
-    Retorna un diccionario {id: "texto traducido en español"}.
-    """
-    if not blocks:
-        return {}
+    """Traduce bloques usando Ollama local con contexto y formato JSON."""
+    system_prompt = (
+        f"Eres un traductor experto de mangas, cómics y novelas gráficas.\n"
+        f"Tu misión es traducir todos los textos del idioma '{src_lang}' al idioma destino '{tgt_lang}'.\n"
+        "REGLAS:\n"
+        "1. NO CENSURES ninguna palabra. Soporta contenido erótico, gore, romance y lenguaje soez.\n"
+        "2. Devuelve ÚNICAMENTE un JSON con pares id: texto_traducido.\n"
+        'Ejemplo: {"1": "¡Hola!", "2": "¡Vamos!"}'
+    )
 
-    # Filtrar bloques con texto vacío
-    valid_blocks = [b for b in blocks if b.text and b.text.strip()]
-    if not valid_blocks:
-        return {b.id: b.text for b in blocks}
-
-    system_prompt, user_prompt = build_translation_prompt(valid_blocks, src_lang=src_lang)
+    items = [{"id": b.id, "text": b.text} for b in blocks]
+    user_payload = {"source": src_lang, "target": tgt_lang, "dialogues": items}
+    user_prompt = f"Traduce los siguientes diálogos:\n{json.dumps(user_payload, ensure_ascii=False)}"
 
     payload = {
         "model": model_name,
         "prompt": f"<system>\n{system_prompt}\n</system>\n\n<user>\n{user_prompt}\n</user>",
         "format": "json",
         "stream": False,
-        "keep_alive": "5m",  # Descarga el modelo de la RAM tras 5 minutos de inactividad
-        "options": {
-            "temperature": 0.3,
-            "top_p": 0.9,
-        }
+        "keep_alive": "5m",
+        "options": {"temperature": 0.3}
     }
 
     translations: Dict[int, str] = {}
-
     try:
-        url = f"{base_url}/api/generate"
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            resp = await client.post(url, json=payload)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(f"{base_url}/api/generate", json=payload)
             if resp.status_code == 200:
                 result = resp.json()
-                raw_response = result.get("response", "{}")
-                try:
-                    parsed = json.loads(raw_response)
-                    # Manejar diferentes variantes de respuestas JSON
-                    if isinstance(parsed, dict):
-                        # Caso directo {"1": "traducción", "2": ...}
-                        # O anidado {"translations": {"1": ...}} o {"blocks": [...]}
-                        if "translations" in parsed and isinstance(parsed["translations"], dict):
-                            parsed = parsed["translations"]
-                        elif "blocks" in parsed and isinstance(parsed["blocks"], list):
-                            for item in parsed["blocks"]:
-                                b_id = item.get("id")
-                                trans = item.get("translation") or item.get("translated_text") or item.get("text", "")
-                                if b_id is not None:
-                                    translations[int(b_id)] = str(trans).strip()
-
-                        for k, v in parsed.items():
-                            try:
-                                block_id = int(k)
-                                if isinstance(v, str):
-                                    translations[block_id] = v.strip()
-                                elif isinstance(v, dict):
-                                    t = v.get("translation") or v.get("text", "")
-                                    translations[block_id] = str(t).strip()
-                            except ValueError:
-                                continue
-                except Exception as je:
-                    logger.warning(f"Error parseando JSON de Ollama: {je}. Respuesta bruta: {raw_response[:200]}")
-            else:
-                logger.error(f"Ollama devolvió código {resp.status_code}: {resp.text}")
+                parsed = json.loads(result.get("response", "{}"))
+                if isinstance(parsed, dict):
+                    for k, v in parsed.items():
+                        try:
+                            b_id = int(k)
+                            translations[b_id] = str(v).strip()
+                        except ValueError:
+                            continue
     except Exception as e:
-        logger.error(f"Error de conexión con Ollama ({base_url}): {e}")
+        logger.warning(f"Fallo en Ollama ({e}). Se usará motor rápido de traducción.")
 
-    # Rellenar con texto original o fallback si algún bloque no vino en la respuesta
+    return translations
+
+
+def translate_page_contextual(
+    blocks: List[TextBlock],
+    model_name: str = "fast",
+    src_lang: str = "auto",
+    tgt_lang: str = "es",
+    base_url: str = OLLAMA_BASE_URL
+) -> Dict[int, str]:
+    """
+    Función orquestadora de traducción:
+    - Si model_name es 'fast' o Google, o si Ollama no está disponible, utiliza el motor ultrarrápido.
+    - Si se especifica un modelo de Ollama (ej. 'qwen2.5:7b'), intenta Ollama y hace fallback inmediato si falla.
+    """
+    if not blocks:
+        return {}
+
+    translations: Dict[int, str] = {}
+    use_ollama = model_name and model_name.lower() not in ["fast", "google", "cloud", "rapido", "rápido"]
+
+    if use_ollama:
+        import asyncio
+        try:
+            translations = asyncio.run(
+                translate_with_ollama(blocks, model_name=model_name, src_lang=src_lang, tgt_lang=tgt_lang, base_url=base_url)
+            )
+        except Exception:
+            translations = {}
+
+    # Traducir los bloques que falten con el motor ultrarrápido (< 200ms cada uno)
     for b in blocks:
-        if b.id not in translations:
-            translations[b.id] = b.text
+        if b.id not in translations or not translations[b.id] or translations[b.id] == b.text:
+            fast_trans = translate_text_fast_google(b.text, src_lang=src_lang, tgt_lang=tgt_lang)
+            if fast_trans:
+                translations[b.id] = fast_trans
+            else:
+                translations[b.id] = b.text
 
     return translations

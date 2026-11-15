@@ -10,7 +10,8 @@ export function App() {
   const [isLoaded, setIsLoaded] = useState(false);
   const [currentMode, setCurrentMode] = useState<AppMode>("quick");
   const [sourceLang, setSourceLang] = useState<string>("auto");
-  const [selectedModel, setSelectedModel] = useState<string>("qwen2.5:7b");
+  const [targetLang, setTargetLang] = useState<string>("es");
+  const [selectedModel, setSelectedModel] = useState<string>("fast");
   const [outputFormat, setOutputFormat] = useState<"zip" | "cbz">("zip");
   const [showCleanToast, setShowCleanToast] = useState(false);
 
@@ -45,6 +46,8 @@ export function App() {
         onModeChange={setCurrentMode}
         sourceLang={sourceLang}
         onSourceLangChange={setSourceLang}
+        targetLang={targetLang}
+        onTargetLangChange={setTargetLang}
         selectedModel={selectedModel}
         onModelChange={setSelectedModel}
         outputFormat={outputFormat}
@@ -57,6 +60,7 @@ export function App() {
         {currentMode === "quick" ? (
           <ClipboardView
             sourceLang={sourceLang}
+            targetLang={targetLang}
             selectedModel={selectedModel}
             createManagedUrl={createManagedUrl}
             revokeManagedUrl={revokeManagedUrl}
@@ -65,6 +69,7 @@ export function App() {
         ) : (
           <BatchZipView
             sourceLang={sourceLang}
+            targetLang={targetLang}
             selectedModel={selectedModel}
             outputFormat={outputFormat}
             onClearMemoryTrigger={handleClearMemory}

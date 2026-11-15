@@ -8,43 +8,23 @@ import {
   RotateCcw,
   Sparkles,
   ClipboardPaste,
-  Image as ImageIcon,
   Check,
   AlertTriangle,
-  Move,
-  BookOpen,
   Zap
 } from "lucide-react";
 
 interface ClipboardViewProps {
   sourceLang: string;
+  targetLang: string;
   selectedModel: string;
   createManagedUrl: (blob: Blob) => string;
   revokeManagedUrl: (url: string | null | undefined) => void;
   onClearMemoryTrigger: () => void;
 }
 
-type Stage =
-  | "idle"
-  | "detecting"
-  | "cleaning"
-  | "translating"
-  | "typesetting"
-  | "done"
-  | "error";
-
-const STAGE_LABELS: Record<Stage, string> = {
-  idle: "Listo",
-  detecting: "Detectando globos y onomatopeyas...",
-  cleaning: "Limpiando dibujo con LaMa y OpenCV...",
-  translating: "Traduciendo contexto completo con Ollama...",
-  typesetting: "Re-tipografiando fuentes...",
-  done: "Traducción completada con éxito",
-  error: "Error durante el procesamiento",
-};
-
 export const ClipboardView: React.FC<ClipboardViewProps> = ({
   sourceLang,
+  targetLang,
   selectedModel,
   createManagedUrl,
   revokeManagedUrl,
@@ -54,7 +34,8 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
   const [translatedBlob, setTranslatedBlob] = useState<Blob | null>(null);
   const [translatedUrl, setTranslatedUrl] = useState<string | null>(null);
 
-  const [stage, setStage] = useState<Stage>("idle");
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [progressPercent, setProgressPercent] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -63,7 +44,6 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
-  const [syncPanZoom, setSyncPanZoom] = useState(true);
 
   // Procesa una imagen Blob enviándola a /translate-single
   const processImageBlob = useCallback(
@@ -79,17 +59,19 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
       setTranslatedUrl(null);
       setErrorMessage(null);
       setCopied(false);
+      setIsTranslating(true);
+      setProgressPercent(15);
 
-      // Simulación de etapas visuales para feedback al usuario
-      setStage("detecting");
-      const stageTimer1 = setTimeout(() => setStage("cleaning"), 500);
-      const stageTimer2 = setTimeout(() => setStage("translating"), 1100);
-      const stageTimer3 = setTimeout(() => setStage("typesetting"), 2200);
+      // Progreso fluido de la barra de carga
+      const p1 = setTimeout(() => setProgressPercent(45), 200);
+      const p2 = setTimeout(() => setProgressPercent(75), 500);
+      const p3 = setTimeout(() => setProgressPercent(90), 800);
 
       try {
         const formData = new FormData();
         formData.append("file", blob, "clipboard_image.png");
         formData.append("src_lang", sourceLang);
+        formData.append("tgt_lang", targetLang);
         formData.append("model_name", selectedModel);
 
         const response = await fetch("http://127.0.0.1:8000/translate-single", {
@@ -97,9 +79,9 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
           body: formData,
         });
 
-        clearTimeout(stageTimer1);
-        clearTimeout(stageTimer2);
-        clearTimeout(stageTimer3);
+        clearTimeout(p1);
+        clearTimeout(p2);
+        clearTimeout(p3);
 
         if (!response.ok) {
           const errText = await response.text();
@@ -109,19 +91,22 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
         const outBlob = await response.blob();
         const newTransUrl = createManagedUrl(outBlob);
 
-        setTranslatedBlob(outBlob);
-        setTranslatedUrl(newTransUrl);
-        setStage("done");
+        setProgressPercent(100);
+        setTimeout(() => {
+          setTranslatedBlob(outBlob);
+          setTranslatedUrl(newTransUrl);
+          setIsTranslating(false);
+        }, 150);
       } catch (err: any) {
-        clearTimeout(stageTimer1);
-        clearTimeout(stageTimer2);
-        clearTimeout(stageTimer3);
+        clearTimeout(p1);
+        clearTimeout(p2);
+        clearTimeout(p3);
         console.error("Error al traducir imagen:", err);
-        setStage("error");
+        setIsTranslating(false);
         setErrorMessage(err.message || "Ocurrió un error al procesar la imagen en el backend.");
       }
     },
-    [sourceLang, selectedModel, createManagedUrl, revokeManagedUrl, originalUrl, translatedUrl]
+    [sourceLang, targetLang, selectedModel, createManagedUrl, revokeManagedUrl, originalUrl, translatedUrl]
   );
 
   // Escuchar evento global 'paste' (Ctrl + V)
@@ -155,7 +140,6 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button === 0) {
-      // Click izquierdo para arrastrar
       setIsDragging(true);
       setDragStart({ x: e.clientX - offset.x, y: e.clientY - offset.y });
     }
@@ -179,18 +163,16 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
     setOffset({ x: 0, y: 0 });
   };
 
-  // Copiar imagen traducida al Portapapeles (navigator.clipboard.write)
+  // Copiar imagen traducida al Portapapeles
   const copyToClipboard = async () => {
     if (!translatedBlob) return;
     try {
-      // El portapapeles requiere PNG estricto
       const item = new ClipboardItem({ "image/png": translatedBlob });
       await navigator.clipboard.write([item]);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
       console.error("Error al copiar al portapapeles:", err);
-      // Fallback: descargar
       downloadTranslatedImage();
     }
   };
@@ -200,7 +182,7 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
     if (!translatedUrl) return;
     const a = document.createElement("a");
     a.href = translatedUrl;
-    a.download = `ClickTranslate_${Date.now()}.png`;
+    a.download = `ClickTranslate_${targetLang.toUpperCase()}_${Date.now()}.png`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -217,37 +199,46 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
     }
   };
 
-  const isBusy = ["detecting", "cleaning", "translating", "typesetting"].includes(stage);
-
   return (
     <div
       className="flex-1 flex flex-col h-[calc(100vh-4rem)] overflow-hidden bg-background"
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
     >
-      {/* Barra de Estado y Controles de Vista */}
+      {/* Barra de Estado con Barra de Carga Dinámica */}
       <div className="h-11 px-4 border-b border-surfaceBorder bg-surface/60 flex items-center justify-between text-xs">
         <div className="flex items-center gap-3">
-          {/* Indicador de Etapa Actual */}
-          {isBusy ? (
-            <div className="flex items-center gap-2 text-indigo-400 font-medium">
-              <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
-              <span>{STAGE_LABELS[stage]}</span>
+          {/* Barra de Progreso Dinámica al traducir */}
+          {isTranslating ? (
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1.5 text-xs text-indigo-400 font-semibold">
+                <Sparkles className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+                <span>Traduciendo viñetas...</span>
+              </div>
+              <div className="w-48 bg-zinc-900 border border-zinc-700/80 rounded-full h-2.5 overflow-hidden p-0.5 shadow-inner">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-purple-500 to-cyan-400 transition-all duration-300 ease-out shadow-sm shadow-indigo-500/50"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+              <span className="font-mono text-xs text-cyan-300 font-bold">{progressPercent}%</span>
             </div>
-          ) : stage === "done" ? (
-            <div className="flex items-center gap-1.5 text-emerald-400 font-medium">
-              <Check className="w-3.5 h-3.5" />
-              <span>{STAGE_LABELS.done}</span>
-            </div>
-          ) : stage === "error" ? (
+          ) : errorMessage ? (
             <div className="flex items-center gap-1.5 text-rose-400 font-medium">
               <AlertTriangle className="w-3.5 h-3.5" />
-              <span>{errorMessage || STAGE_LABELS.error}</span>
+              <span>{errorMessage}</span>
+            </div>
+          ) : translatedUrl ? (
+            <div className="flex items-center gap-1.5 text-emerald-400 font-medium">
+              <Check className="w-3.5 h-3.5" />
+              <span>Traducción completada con éxito</span>
             </div>
           ) : (
             <div className="flex items-center gap-1.5 text-zinc-400">
               <ClipboardPaste className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Presiona <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-mono">Ctrl + V</kbd> para traducir una captura al instante</span>
+              <span>
+                Presiona <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-mono">Ctrl + V</kbd> para traducir una captura al instante
+              </span>
             </div>
           )}
         </div>
@@ -314,7 +305,7 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
         {/* Panel Izquierdo: Original */}
         <div className="relative flex flex-col items-center justify-center h-full overflow-hidden bg-zinc-950/40 p-4">
           <div className="absolute top-3 left-4 z-10 px-2.5 py-1 rounded-md bg-zinc-900/80 backdrop-blur border border-surfaceBorder text-[11px] font-semibold text-zinc-300">
-            Original
+            Original {sourceLang !== "auto" ? `(${sourceLang.toUpperCase()})` : ""}
           </div>
 
           {originalUrl ? (
@@ -348,7 +339,7 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
               </div>
 
               <h3 className="text-base font-bold text-zinc-100 mb-1 flex items-center gap-2">
-                <span>Captura o Pega tu Manga</span>
+                <span>Captura o Pega tu Cómic</span>
               </h3>
               <p className="text-xs text-zinc-400 mb-4 leading-relaxed">
                 Toma una captura con <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-mono text-[11px]">Win + Shift + S</kbd> y pulsa <kbd className="px-1.5 py-0.5 rounded bg-indigo-900/60 border border-indigo-500/40 text-indigo-300 font-mono text-[11px]">Ctrl + V</kbd> aquí.
@@ -369,7 +360,7 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
         <div className="relative flex flex-col items-center justify-center h-full overflow-hidden bg-zinc-950/20 p-4">
           <div className="absolute top-3 left-4 z-10 px-2.5 py-1 rounded-md bg-zinc-900/80 backdrop-blur border border-surfaceBorder text-[11px] font-semibold text-indigo-300 flex items-center gap-1.5">
             <Sparkles className="w-3 h-3 text-indigo-400" />
-            Traducido (ES)
+            Traducido ({targetLang.toUpperCase()})
           </div>
 
           {translatedUrl ? (
@@ -386,11 +377,24 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
                 draggable={false}
               />
             </div>
-          ) : isBusy ? (
-            <div className="flex flex-col items-center text-center text-indigo-400 pointer-events-none">
-              <div className="w-14 h-14 rounded-full border-2 border-indigo-500/20 border-t-indigo-500 animate-spin mb-4" />
-              <p className="text-sm font-medium text-zinc-200">{STAGE_LABELS[stage]}</p>
-              <p className="text-xs text-zinc-500 mt-1">Procesando estrictamente en memoria RAM</p>
+          ) : isTranslating ? (
+            /* Barra de Progreso Central Futurista con Porcentaje */
+            <div className="flex flex-col items-center text-center max-w-xs pointer-events-none p-6">
+              <div className="relative w-20 h-20 mb-4 flex items-center justify-center">
+                <div className="absolute inset-0 rounded-full border-4 border-indigo-500/20 border-t-indigo-400 border-r-cyan-400 animate-spin" />
+                <span className="font-mono text-lg font-extrabold text-white tracking-wider">
+                  {progressPercent}%
+                </span>
+              </div>
+
+              <p className="text-sm font-bold text-zinc-100 mb-1">Traduciendo viñetas...</p>
+              <div className="w-56 bg-zinc-900 border border-zinc-800 rounded-full h-2 overflow-hidden mt-2 mb-1.5 shadow-inner">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-purple-500 to-cyan-400 transition-all duration-300 ease-out"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+              <p className="text-[11px] text-zinc-400 mt-1">Limpieza visual e inpainting en RAM</p>
             </div>
           ) : (
             <div className="flex flex-col items-center text-center text-zinc-500 max-w-xs pointer-events-none p-6">
@@ -399,7 +403,7 @@ export const ClipboardView: React.FC<ClipboardViewProps> = ({
               </div>
               <p className="text-sm font-semibold text-zinc-200 mb-1">Traducción Re-tipografiada</p>
               <p className="text-xs text-zinc-400 leading-relaxed">
-                El motor detectará automáticamente globos y onomatopeyas, limpiará el fondo con LaMa y maquetará la traducción en español.
+                El motor detectará automáticamente globos de diálogo, limpiará el fondo y remaquetará el texto en <span className="font-semibold text-indigo-300">{targetLang.toUpperCase()}</span>.
               </p>
               <div className="mt-4 flex items-center gap-1.5 px-3 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-[10px] text-zinc-400">
                 <Zap className="w-3 h-3 text-indigo-400" />

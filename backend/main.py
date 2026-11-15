@@ -1,7 +1,7 @@
 """
 Servidor FastAPI para ClickTranslate.
 Procesamiento 100% en memoria RAM (Zero Persistence).
-Optimizado para entornos con 8 GB de RAM mediante Lazy Loading y Garbage Collection.
+Optimizado para traducción instantánea multi-idioma (esquema Google Translate + Ollama local).
 """
 
 import io
@@ -38,11 +38,11 @@ logger = logging.getLogger("ClickTranslate.Server")
 
 app = FastAPI(
     title="ClickTranslate Backend",
-    version="1.0.0",
+    version="1.1.0",
     description="Motor de traducción visual para cómics, mangas y manhwas sin persistencia en disco"
 )
 
-# Habilitar CORS para Tauri y clientes web
+# Habilitar CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -51,26 +51,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Diccionario de trabajos en memoria RAM
-# job_id -> { "status": str, "page": int, "total": int, "percent": int, "thumbnail": str, "buffer": io.BytesIO, ... }
 BATCH_JOBS: Dict[str, Dict[str, Any]] = {}
-
 VALID_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 
 
-def process_single_image_in_memory(image_bytes: bytes, src_lang: str, model_name: str) -> Tuple[bytes, bytes]:
+def process_single_image_in_memory(
+    image_bytes: bytes,
+    src_lang: str = "auto",
+    tgt_lang: str = "es",
+    model_name: str = "fast"
+) -> Tuple[bytes, bytes]:
     """
     Ejecuta el pipeline de traducción completo sobre los bytes de una imagen en memoria RAM.
     Retorna: (imagen_traducida_png_bytes, miniatura_jpeg_bytes)
     """
-    # Decodificar imagen desde memoria
     np_arr = np.frombuffer(image_bytes, np.uint8)
     img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
     if img_bgr is None:
         raise ValueError("No se pudo decodificar la imagen proporcionada.")
 
-    # 1. OCR (detección de texto y extracción)
+    # 1. OCR Ultra-Rápido con RapidOCR + Agrupamiento
     ocr_results = run_ocr(img_bgr, raw_lang=src_lang)
     raw_boxes = [box for box, _ in ocr_results]
 
@@ -84,50 +85,37 @@ def process_single_image_in_memory(image_bytes: bytes, src_lang: str, model_name
                 block.text = text
                 break
 
-    # 3. Limpieza visual (Inpainting: OpenCV para globos, LaMa para SFX)
+    # 3. Limpieza visual instantánea (OpenCV Telea + Relleno)
     cleaned_img = clean_page(img_bgr, blocks, balloon_mask, sfx_mask)
 
-    # 4. Traducción contextual con Ollama
-    # Ejecutamos en loop sincrónico para la función auxiliar
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                translations = pool.submit(
-                    asyncio.run,
-                    translate_page_contextual(blocks, model_name=model_name, src_lang=src_lang)
-                ).result()
-        else:
-            translations = loop.run_until_complete(
-                translate_page_contextual(blocks, model_name=model_name, src_lang=src_lang)
-            )
-    except Exception:
-        # Fallback de llamada directa
-        translations = asyncio.run(
-            translate_page_contextual(blocks, model_name=model_name, src_lang=src_lang)
-        )
+    # 4. Traducción multi-idioma (Fast Google / Ollama)
+    translations = translate_page_contextual(
+        blocks,
+        model_name=model_name,
+        src_lang=src_lang,
+        tgt_lang=tgt_lang
+    )
 
     for block in blocks:
         if block.id in translations:
             block.translated_text = translations[block.id]
 
-    # 5. Re-tipografía inteligente (Pillow)
+    # 5. Re-tipografía inteligente (Pillow con auto-fit y fuentes del sistema)
     final_bgr = render_typesetting(cleaned_img, blocks)
 
-    # Codificar a PNG en memoria
+    # Codificar a PNG en memoria RAM
     success, png_buf = cv2.imencode(".png", final_bgr)
     if not success:
         raise RuntimeError("Error al codificar imagen traducida a PNG.")
 
-    # Generar miniatura JPEG ligera para preview en vivo
+    # Generar miniatura JPEG ligera para preview
     h, w = final_bgr.shape[:2]
     thumb_w = 400
     thumb_h = int(h * (thumb_w / max(1, w)))
     resized_thumb = cv2.resize(final_bgr, (thumb_w, thumb_h), interpolation=cv2.INTER_AREA)
     _, thumb_buf = cv2.imencode(".jpg", resized_thumb, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
 
-    # Forzar recolección de basura para optimización en 8GB de RAM
+    # Liberar referencias para garbage collection
     del np_arr, img_bgr, cleaned_img, final_bgr, resized_thumb
     gc.collect()
 
@@ -151,7 +139,8 @@ async def list_models():
 async def translate_single(
     file: UploadFile = File(...),
     src_lang: str = Form("auto"),
-    model_name: str = Form("qwen2.5:7b")
+    tgt_lang: str = Form("es"),
+    model_name: str = Form("fast")
 ):
     """
     Traduce una imagen individual del portapapeles o archivo.
@@ -159,7 +148,12 @@ async def translate_single(
     """
     try:
         content = await file.read()
-        translated_png, _ = process_single_image_in_memory(content, src_lang, model_name)
+        translated_png, _ = process_single_image_in_memory(
+            content,
+            src_lang=src_lang,
+            tgt_lang=tgt_lang,
+            model_name=model_name
+        )
         return Response(content=translated_png, media_type="image/png")
     except Exception as e:
         logger.error(f"Error procesando /translate-single: {e}", exc_info=True)
@@ -168,7 +162,14 @@ async def translate_single(
         gc.collect()
 
 
-async def run_batch_job_task(job_id: str, zip_bytes: bytes, src_lang: str, model_name: str, out_ext: str):
+async def run_batch_job_task(
+    job_id: str,
+    zip_bytes: bytes,
+    src_lang: str,
+    tgt_lang: str,
+    model_name: str,
+    out_ext: str
+):
     """Tarea asíncrona de procesamiento de lote ZIP/CBZ página por página en RAM."""
     job_info = BATCH_JOBS.get(job_id)
     if not job_info:
@@ -178,7 +179,6 @@ async def run_batch_job_task(job_id: str, zip_bytes: bytes, src_lang: str, model
         in_memory_zip = zipfile.ZipFile(io.BytesIO(zip_bytes))
         all_entries = in_memory_zip.namelist()
 
-        # Filtrar solo imágenes válidas ignorando directorios y metadatos del SO
         image_entries = [
             f for f in all_entries
             if not f.startswith("__MACOSX/")
@@ -197,28 +197,24 @@ async def run_batch_job_task(job_id: str, zip_bytes: bytes, src_lang: str, model
 
         job_info["total"] = total_pages
 
-        # Crear ZIP de salida completamente en memoria RAM
         out_memory_buffer = io.BytesIO()
         with zipfile.ZipFile(out_memory_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as out_zip:
             for idx, img_name in enumerate(sorted_images):
                 if job_info.get("cancelled", False):
-                    logger.info(f"Trabajo {job_id} cancelado por el usuario.")
                     return
 
-                # Leer la página de forma secuencial
                 raw_img_bytes = in_memory_zip.read(img_name)
-
-                # Traducir página
                 translated_png_bytes, thumb_jpeg_bytes = process_single_image_in_memory(
-                    raw_img_bytes, src_lang, model_name
+                    raw_img_bytes,
+                    src_lang=src_lang,
+                    tgt_lang=tgt_lang,
+                    model_name=model_name
                 )
 
-                # Guardar en el zip de salida conservando la estructura de nombres
                 base, _ = os.path.splitext(img_name)
                 out_name = f"{base}.png"
                 out_zip.writestr(out_name, translated_png_bytes)
 
-                # Actualizar estado de progreso y miniatura para SSE
                 thumb_b64 = f"data:image/jpeg;base64,{base64.b64encode(thumb_jpeg_bytes).decode('ascii')}"
                 current_page = idx + 1
                 percent = int((current_page / total_pages) * 100)
@@ -227,17 +223,16 @@ async def run_batch_job_task(job_id: str, zip_bytes: bytes, src_lang: str, model
                 job_info["percent"] = percent
                 job_info["thumbnail"] = thumb_b64
 
-                # Limpieza estricta de memoria tras cada iteración
                 del raw_img_bytes, translated_png_bytes, thumb_jpeg_bytes
                 gc.collect()
 
         out_memory_buffer.seek(0)
         job_info["output_bytes"] = out_memory_buffer.getvalue()
         job_info["status"] = "completed"
-        logger.info(f"Trabajo {job_id} completado exitosamente ({total_pages} páginas).")
+        logger.info(f"Trabajo {job_id} completado ({total_pages} páginas).")
 
     except Exception as e:
-        logger.error(f"Error en trabajo de lote {job_id}: {e}", exc_info=True)
+        logger.error(f"Error en trabajo {job_id}: {e}", exc_info=True)
         job_info["status"] = "error"
         job_info["error"] = str(e)
     finally:
@@ -249,20 +244,18 @@ async def translate_batch(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     src_lang: str = Form("auto"),
-    model_name: str = Form("qwen2.5:7b"),
+    tgt_lang: str = Form("es"),
+    model_name: str = Form("fast"),
     output_format: str = Form("zip")
 ):
-    """
-    Recibe un archivo ZIP o CBZ y arranca el procesamiento por páginas en RAM.
-    Retorna un job_id para seguimiento mediante Server-Sent Events.
-    """
+    """Recibe archivo ZIP/CBZ y procesa en lote."""
     content = await file.read()
     job_id = str(uuid.uuid4())
 
     orig_filename = file.filename or "manga_chapter"
     base_name, _ = os.path.splitext(orig_filename)
     out_ext = "cbz" if output_format.lower() == "cbz" else "zip"
-    final_filename = f"{base_name}_ES.{out_ext}"
+    final_filename = f"{base_name}_{tgt_lang.upper()}.{out_ext}"
 
     BATCH_JOBS[job_id] = {
         "job_id": job_id,
@@ -277,9 +270,8 @@ async def translate_batch(
         "error": None
     }
 
-    # Despachar tarea en segundo plano
     background_tasks.add_task(
-        run_batch_job_task, job_id, content, src_lang, model_name, out_ext
+        run_batch_job_task, job_id, content, src_lang, tgt_lang, model_name, out_ext
     )
 
     return {"job_id": job_id, "filename": final_filename}
@@ -310,7 +302,6 @@ async def stream_progress(job_id: str):
                 "error": job["error"]
             }
 
-            import json
             yield {"event": "message", "data": json.dumps(data)}
 
             if job["status"] in ["completed", "error"] or job.get("cancelled"):
@@ -323,18 +314,15 @@ async def stream_progress(job_id: str):
 
 @app.get("/download/{job_id}")
 def download_batch_result(job_id: str):
-    """
-    Descarga el ZIP o CBZ generado y purga inmediatamente el trabajo de la memoria RAM.
-    """
+    """Descarga el ZIP/CBZ y purga de la memoria RAM."""
     job = BATCH_JOBS.get(job_id)
     if not job or job["status"] != "completed" or not job["output_bytes"]:
-        raise HTTPException(status_code=404, detail="El archivo aún no está listo o ya fue purgado.")
+        raise HTTPException(status_code=404, detail="Archivo no listo o purgado.")
 
     data = job["output_bytes"]
     filename = job["filename"]
     media_type = "application/vnd.comicbook+zip" if filename.endswith(".cbz") else "application/zip"
 
-    # Purgar inmediatamente el job de la memoria RAM (Principio de Cero Persistencia)
     del BATCH_JOBS[job_id]
     gc.collect()
 
@@ -347,7 +335,7 @@ def download_batch_result(job_id: str):
 
 @app.post("/cancel/{job_id}")
 def cancel_batch_job(job_id: str):
-    """Cancela un trabajo en cola o ejecución y libera la memoria RAM."""
+    """Cancela un trabajo en cola y libera RAM."""
     job = BATCH_JOBS.get(job_id)
     if job:
         job["cancelled"] = True
