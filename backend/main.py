@@ -16,9 +16,12 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# Evitar consultas de red lentas a Hugging Face en cada llamada de OCR
+# Evitar consultas de red lentas a Hugging Face / PaddleX en cada llamada de OCR
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+os.environ["DISABLE_MODEL_SOURCE_CHECK"] = "True"
+os.environ["FLAGS_use_mkldnn"] = "0"
 import gc
 import uuid
 import json
@@ -40,9 +43,9 @@ from sse_starlette.sse import EventSourceResponse
 from PIL import Image
 from core.comic_detector import detect_comic_text
 from core.detector import detect_balloons_and_sfx, get_dominant_bg_color, sort_blocks, TextBlock
-from core.ocr_engine import run_ocr, get_manga_ocr, get_rapid_ocr
+from core.ocr_engine import run_ocr, get_manga_ocr, get_rapid_ocr, detect_and_read_japanese_paddle
 from core.inpainter import clean_page
-from core.translator import translate_page_contextual, fetch_available_models
+from core.translator import translate_page_contextual, fetch_available_models, has_cjk
 from core.typesetter import render_typesetting
 
 # Configuración de Logging
@@ -96,12 +99,25 @@ def process_single_image_in_memory(
     # 1. Detección neuronal especializada con Comic-Text-Detector (ONNX)
     comic_blocks, text_mask = detect_comic_text(img_bgr)
 
-    if comic_blocks:
-        logger.info(f"ComicDetector identificó {len(comic_blocks)} regiones en la página.")
-        manga_engine = get_manga_ocr() if is_japanese else None
-        rapid_engine = get_rapid_ocr()
+    # 2. Para Japonés (o modo 'auto' con texto vertical / manga), usar PaddleOCR PP-OCRv6 Dual-Orientation
+    jp_regions = []
+    has_vertical_hint = any(cb.get("vertical", False) for cb in comic_blocks)
+    if is_japanese:
+        jp_regions = detect_and_read_japanese_paddle(img_bgr, comic_blocks=comic_blocks)
+    elif lang_code == "auto" and (has_vertical_hint or not comic_blocks):
+        candidate_jp = detect_and_read_japanese_paddle(img_bgr, comic_blocks=comic_blocks)
+        if any(any((0x3040 <= ord(c) <= 0x30FF) for c in r.get("text", "")) for r in candidate_jp):
+            jp_regions = candidate_jp
+            is_japanese = True
 
-        reading_dir = "rtl" if lang_code in ["ja", "jp", "auto"] else "ltr"
+    active_regions = jp_regions if jp_regions else comic_blocks
+
+    if active_regions:
+        logger.info(f"Motor activo detectó {len(active_regions)} regiones ({'JP-PPOCRv6' if jp_regions else 'ComicDetector'}).")
+        manga_engine = None
+        rapid_engine = get_rapid_ocr() if not jp_regions else None
+
+        reading_dir = "rtl" if (is_japanese or lang_code in ["ja", "jp", "auto"]) else "ltr"
         raw_blocks = []
         cleaned_img = img_bgr.copy()
 
@@ -115,7 +131,7 @@ def process_single_image_in_memory(
             if area > 800 and (bw < im_w * 0.90 and bh < im_h * 0.90):
                 balloon_contours.append((cnt, (bx, by, bx + bw, by + bh)))
 
-        for idx, cb in enumerate(comic_blocks):
+        for idx, cb in enumerate(active_regions):
             x1, y1, x2, y2 = cb["box"]
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(im_w, x2), min(im_h, y2)
@@ -126,6 +142,7 @@ def process_single_image_in_memory(
             crop_bgr = img_bgr[y1:y2, x1:x2]
             is_vertical = bool(cb.get("vertical", False))
             cb_lines = cb.get("lines", [])
+            poly_boxes = cb.get("poly_boxes", [])
 
             center_pt = ((x1 + x2) // 2, (y1 + y2) // 2)
             matching_balloon = None
@@ -139,7 +156,9 @@ def process_single_image_in_memory(
                         matching_cnt = cnt
                         break
 
-            # OCR Inteligente Multi-idioma con soporte por línea en bloques horizontales
+            extracted_text = cb.get("text", "") if jp_regions else ""
+
+            # OCR Inteligente Multi-idioma para regiones sin texto pre-extraído
             def contains_kana(txt: str) -> bool:
                 return any((0x3040 <= ord(c) <= 0x309F) or (0x30A0 <= ord(c) <= 0x30FF) for c in txt)
 
@@ -157,93 +176,92 @@ def process_single_image_in_memory(
                         logger.warning(f"Error Manga-OCR: {e}")
                 return ""
 
-            extracted_text = ""
-            if is_japanese:
-                # Si es un bloque horizontal con múltiples líneas (ej. fecha + subtítulo), leer línea por línea sin duplicados
-                if not is_vertical and len(cb_lines) > 1:
-                    raw_lboxes = []
-                    for poly in cb_lines:
-                        pts = np.array(poly)
-                        lx1, ly1 = max(0, int(pts[:, 0].min()) - 4), max(0, int(pts[:, 1].min()) - 4)
-                        lx2, ly2 = min(im_w, int(pts[:, 0].max()) + 4), min(im_h, int(pts[:, 1].max()) + 4)
-                        if lx2 - lx1 >= 12 and ly2 - ly1 >= 12:
-                            raw_lboxes.append([ly1, lx1, lx2, ly2])
-                    raw_lboxes.sort(key=lambda b: b[0])
-                    # Fusionar líneas que se solapen verticalmente (> 45% de su altura)
-                    dedup_lboxes = []
-                    for lb in raw_lboxes:
-                        if not dedup_lboxes:
-                            dedup_lboxes.append(lb)
-                        else:
-                            prev = dedup_lboxes[-1]
-                            ov_y = max(0, min(prev[3], lb[3]) - max(prev[0], lb[0]))
-                            min_h = min(prev[3] - prev[0], lb[3] - lb[0])
-                            if min_h > 0 and (ov_y / min_h) >= 0.45:
-                                prev[0] = min(prev[0], lb[0])
-                                prev[1] = min(prev[1], lb[1])
-                                prev[2] = max(prev[2], lb[2])
-                                prev[3] = max(prev[3], lb[3])
-                            else:
-                                dedup_lboxes.append(lb)
-                    line_texts = []
-                    for (ly1, lx1, lx2, ly2) in dedup_lboxes:
-                        lt = ocr_japanese_crop(img_bgr[ly1:ly2, lx1:lx2])
-                        if lt:
-                            line_texts.append(unicodedata.normalize("NFKC", lt).strip())
-                    extracted_text = "\n".join(line_texts).strip()
-
-                if not extracted_text:
-                    extracted_text = ocr_japanese_crop(crop_bgr)
-
-                if not extracted_text and rapid_engine is not None and crop_bgr.size > 0:
-                    r_res, _ = rapid_engine(crop_bgr)
-                    if r_res:
-                        extracted_text = " ".join([item[1] for item in r_res]).strip()
-            else:
-                # Inglés, coreano, chino o modo 'auto': RapidOCR procesa primero con orden vertical y horizontal
-                if rapid_engine is not None and crop_bgr.size > 0:
-                    try:
-                        r_res, _ = rapid_engine(crop_bgr)
-                        if r_res:
-                            lines_grouped = []
-                            for item in r_res:
-                                iy = item[0][0][1]
-                                ix = item[0][0][0]
-                                itxt = item[1]
-                                placed = False
-                                for lg in lines_grouped:
-                                    if abs(lg["y"] - iy) <= 7:
-                                        lg["items"].append((ix, itxt))
-                                        placed = True
-                                        break
-                                if not placed:
-                                    lines_grouped.append({"y": iy, "items": [(ix, itxt)]})
-                            lines_grouped.sort(key=lambda l: l["y"])
-                            full_lines = []
-                            for lg in lines_grouped:
-                                lg["items"].sort(key=lambda w: w[0])
-                                full_lines.append(" ".join([w[1] for w in lg["items"]]))
-                            extracted_text = " ".join(full_lines).strip()
-                    except Exception as e:
-                        logger.warning(f"Error RapidOCR: {e}")
-
-                # Si en modo 'auto' el texto extraído contiene Kana japonés, usar Manga-OCR
-                if lang_code == "auto" and contains_kana(extracted_text):
+            if not extracted_text:
+                if is_japanese:
+                    # Si es un bloque horizontal con múltiples líneas (ej. fecha + subtítulo), leer línea por línea sin duplicados
                     if not is_vertical and len(cb_lines) > 1:
-                        line_boxes = []
+                        raw_lboxes = []
                         for poly in cb_lines:
                             pts = np.array(poly)
                             lx1, ly1 = max(0, int(pts[:, 0].min()) - 4), max(0, int(pts[:, 1].min()) - 4)
                             lx2, ly2 = min(im_w, int(pts[:, 0].max()) + 4), min(im_h, int(pts[:, 1].max()) + 4)
-                            if lx2 - lx1 >= 8 and ly2 - ly1 >= 8:
-                                line_boxes.append((ly1, lx1, lx2, ly2))
-                        line_boxes.sort(key=lambda b: b[0])
-                        line_texts = [ocr_japanese_crop(img_bgr[ly1:ly2, lx1:lx2]) for (ly1, lx1, lx2, ly2) in line_boxes]
-                        m_txt = "\n".join([t for t in line_texts if t]).strip()
-                    else:
-                        m_txt = ocr_japanese_crop(crop_bgr)
-                    if m_txt and contains_kana(m_txt):
-                        extracted_text = m_txt
+                            if lx2 - lx1 >= 12 and ly2 - ly1 >= 12:
+                                raw_lboxes.append([ly1, lx1, lx2, ly2])
+                        raw_lboxes.sort(key=lambda b: b[0])
+                        dedup_lboxes = []
+                        for lb in raw_lboxes:
+                            if not dedup_lboxes:
+                                dedup_lboxes.append(lb)
+                            else:
+                                prev = dedup_lboxes[-1]
+                                ov_y = max(0, min(prev[3], lb[3]) - max(prev[0], lb[0]))
+                                min_h = min(prev[3] - prev[0], lb[3] - lb[0])
+                                if min_h > 0 and (ov_y / min_h) >= 0.45:
+                                    prev[0] = min(prev[0], lb[0])
+                                    prev[1] = min(prev[1], lb[1])
+                                    prev[2] = max(prev[2], lb[2])
+                                    prev[3] = max(prev[3], lb[3])
+                                else:
+                                    dedup_lboxes.append(lb)
+                        line_texts = []
+                        for (ly1, lx1, lx2, ly2) in dedup_lboxes:
+                            lt = ocr_japanese_crop(img_bgr[ly1:ly2, lx1:lx2])
+                            if lt:
+                                line_texts.append(unicodedata.normalize("NFKC", lt).strip())
+                        extracted_text = "\n".join(line_texts).strip()
+
+                    if not extracted_text:
+                        extracted_text = ocr_japanese_crop(crop_bgr)
+
+                    if not extracted_text and rapid_engine is not None and crop_bgr.size > 0:
+                        r_res, _ = rapid_engine(crop_bgr)
+                        if r_res:
+                            extracted_text = " ".join([item[1] for item in r_res]).strip()
+                else:
+                    # Inglés, coreano, chino o modo 'auto': RapidOCR procesa primero con orden vertical y horizontal
+                    if rapid_engine is not None and crop_bgr.size > 0:
+                        try:
+                            r_res, _ = rapid_engine(crop_bgr)
+                            if r_res:
+                                lines_grouped = []
+                                for item in r_res:
+                                    iy = item[0][0][1]
+                                    ix = item[0][0][0]
+                                    itxt = item[1]
+                                    placed = False
+                                    for lg in lines_grouped:
+                                        if abs(lg["y"] - iy) <= 7:
+                                            lg["items"].append((ix, itxt))
+                                            placed = True
+                                            break
+                                    if not placed:
+                                        lines_grouped.append({"y": iy, "items": [(ix, itxt)]})
+                                lines_grouped.sort(key=lambda l: l["y"])
+                                full_lines = []
+                                for lg in lines_grouped:
+                                    lg["items"].sort(key=lambda w: w[0])
+                                    full_lines.append(" ".join([w[1] for w in lg["items"]]))
+                                extracted_text = " ".join(full_lines).strip()
+                        except Exception as e:
+                            logger.warning(f"Error RapidOCR: {e}")
+
+                    # Si en modo 'auto' el texto extraído contiene Kana japonés, usar Manga-OCR
+                    if lang_code == "auto" and contains_kana(extracted_text):
+                        if not is_vertical and len(cb_lines) > 1:
+                            line_boxes = []
+                            for poly in cb_lines:
+                                pts = np.array(poly)
+                                lx1, ly1 = max(0, int(pts[:, 0].min()) - 4), max(0, int(pts[:, 1].min()) - 4)
+                                lx2, ly2 = min(im_w, int(pts[:, 0].max()) + 4), min(im_h, int(pts[:, 1].max()) + 4)
+                                if lx2 - lx1 >= 8 and ly2 - ly1 >= 8:
+                                    line_boxes.append((ly1, lx1, lx2, ly2))
+                            line_boxes.sort(key=lambda b: b[0])
+                            line_texts = [ocr_japanese_crop(img_bgr[ly1:ly2, lx1:lx2]) for (ly1, lx1, lx2, ly2) in line_boxes]
+                            m_txt = "\n".join([t for t in line_texts if t]).strip()
+                        else:
+                            m_txt = ocr_japanese_crop(crop_bgr)
+                        if m_txt and contains_kana(m_txt):
+                            extracted_text = m_txt
 
             # Normalizar NFKC estrictamente para eliminar fullwidth characters (evita cuadrados/tofu)
             extracted_text = unicodedata.normalize("NFKC", extracted_text).strip()
@@ -304,6 +322,9 @@ def process_single_image_in_memory(
 
             fg_sat = int(np.max(fg_bgr)) - int(np.min(fg_bgr))
 
+            draw_backdrop = False
+            render_box = None
+
             # Clasificación de bloque y limpieza visual impecable
             is_dark_neutral_text = (float(np.mean(fg_bgr)) < 115.0) and (fg_sat < 45)
             if matching_balloon or (is_uniform and bg_bright > 195 and is_dark_neutral_text):
@@ -355,13 +376,24 @@ def process_single_image_in_memory(
                     target_fill = np.array([255, 255, 255], dtype=np.uint8) if has_balloon_border else bg_median
                     diff_target = np.linalg.norm(sub_clean.astype(np.float32) - target_fill.astype(np.float32), axis=2)
                     if has_balloon_border:
-                        # Dentro de mini-globo con borde negro: borrar solo píxeles saturados (texto rosa/rojo) dentro del globo
                         erase_m = (search_zone > 0) & (~is_black_lineart) & (sub_sat >= 18)
-                    else:
-                        # SFX libre sobre fondo crema/claro: borrar tanto el color como su halo blanco hacia el color exacto del fondo
+                    elif is_uniform:
                         erase_m = (search_zone > 0) & (~is_black_lineart) & ((sub_sat >= 16) | (diff_target > 6.0))
-                    sub_clean[erase_m] = target_fill
-                    cleaned_img[py1:py2, px1:px2] = sub_clean
+                    else:
+                        erase_m = None
+
+                    if erase_m is not None:
+                        sub_clean[erase_m] = target_fill
+                        cleaned_img[py1:py2, px1:px2] = sub_clean
+                    else:
+                        # Texto flotante sobre cielo/paisaje claro: usar tarjeta scanlation legible + inpainting
+                        if np.count_nonzero(sub_mask) > 0:
+                            r_inp = max(5, min(14, int(min(bw, bh) * 0.12)))
+                            k_inp = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_inp + 1, 2 * r_inp + 1))
+                            dilated = cv2.dilate(sub_mask, k_inp, iterations=1)
+                            cleaned_img[py1:py2, px1:px2] = cv2.inpaint(cleaned_img[py1:py2, px1:px2], dilated, 5, cv2.INPAINT_TELEA)
+                        if len(extracted_text.replace("\n", "")) >= 7:
+                            draw_backdrop = True
                 elif is_uniform:
                     # Fondo uniforme (oscuro, negro o sólido): reemplazar núcleo + contorno con el color exacto del fondo (bg_median)
                     sub_clean = cleaned_img[py1:py2, px1:px2]
@@ -370,13 +402,34 @@ def process_single_image_in_memory(
                     sub_clean[erase_m] = bg_median
                     cleaned_img[py1:py2, px1:px2] = sub_clean
                 else:
-                    # Fondo con dibujo artístico complejo: dilatar máscara para cubrir todo el stroke antes de Telea
-                    if np.count_nonzero(sub_mask) > 0:
-                        r_inp = max(5, min(16, int(min(bw, bh) * 0.12)))
+                    # Fondo con dibujo artístico complejo: construir máscara combinada (text_mask + poly_boxes) y limpiar
+                    combined_sub_mask = sub_mask.copy()
+                    if poly_boxes:
+                        for (pbx1, pby1, pbx2, pby2) in poly_boxes:
+                            lx1, ly1 = max(0, pbx1 - px1), max(0, pby1 - py1)
+                            lx2, ly2 = min(px2 - px1, pbx2 - px1), min(py2 - py1, pby2 - py1)
+                            if lx2 > lx1 and ly2 > ly1:
+                                patch_sub = cleaned_img[py1 + ly1 : py1 + ly2, px1 + lx1 : px1 + lx2]
+                                p_sat = np.max(patch_sub, axis=2).astype(int) - np.min(patch_sub, axis=2).astype(int)
+                                p_bri = np.mean(patch_sub, axis=2)
+                                glyph_m = ((p_bri > 205) & (p_sat < 45)) | (p_sat > 65)
+                                combined_sub_mask[ly1:ly2, lx1:lx2][glyph_m] = 255
+                    if np.count_nonzero(combined_sub_mask) > 0:
+                        r_inp = max(4, min(12, int(min(bw, bh) * 0.10)))
                         k_inp = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_inp + 1, 2 * r_inp + 1))
-                        dilated = cv2.dilate(sub_mask, k_inp, iterations=1)
+                        dilated = cv2.dilate(combined_sub_mask, k_inp, iterations=1)
                         inpainted = cv2.inpaint(cleaned_img[py1:py2, px1:px2], dilated, 5, cv2.INPAINT_TELEA)
                         cleaned_img[py1:py2, px1:px2] = inpainted
+                    if len(extracted_text.replace("\n", "")) >= 7:
+                        draw_backdrop = True
+
+                # Si es diálogo flotante vertical estrecho sobre ilustración, ampliar caja horizontalmente para lectura clara
+                if draw_backdrop and bw < bh * 0.85:
+                    target_w = min(int(im_w * 0.28), max(bw * 2, int(bh * 0.60), 160))
+                    cx_b = (x1 + x2) // 2
+                    rx1 = max(6, min(im_w - target_w - 6, cx_b - target_w // 2))
+                    rx2 = min(im_w - 6, rx1 + target_w)
+                    render_box = (rx1, max(6, y1 - 4), rx2, min(im_h - 6, y2 + 4))
 
             tb = TextBlock(
                 id=idx + 1,
@@ -386,7 +439,9 @@ def process_single_image_in_memory(
                 bg_color=dom_color,
                 text_color=text_color,
                 stroke_color=stroke_color,
-                is_uniform_bg=is_uniform
+                is_uniform_bg=is_uniform,
+                render_box=render_box,
+                draw_backdrop=draw_backdrop
             )
             raw_blocks.append(tb)
 

@@ -238,30 +238,32 @@ def render_typesetting(img_bgr: np.ndarray, blocks: List[TextBlock]) -> np.ndarr
     """
     Dibuja los textos traducidos en la imagen limpia:
     - Diálogos en globo claro: Centrados con auto-fit y color negro nítido estilo scanlation.
-    - Textos sobre fondo oscuro, carteles o SFX: Preservan el color de texto y el contorno (stroke) original.
+    - Textos flotantes sobre fondo artístico complejo: Caja expandida con tarjeta translúcida de alto contraste para legibilidad 100%.
+    - Textos sobre fondo oscuro uniforme o SFX: Preservan el color de texto y el contorno (stroke) original.
     """
+    im_h, im_w = img_bgr.shape[:2]
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(img_rgb)
-    draw = ImageDraw.Draw(pil_img)
+    pil_img = Image.fromarray(img_rgb).convert("RGBA")
 
     for block in blocks:
         text = unicodedata.normalize("NFKC", block.translated_text or block.text).strip()
         if not text:
             continue
 
-        x1, y1, x2, y2 = block.box
-        bw = max(12, x2 - x1)
-        bh = max(12, y2 - y1)
+        x1, y1, x2, y2 = block.render_box if block.render_box is not None else block.box
+        bw = max(16, x2 - x1)
+        bh = max(16, y2 - y1)
         cx = (x1 + x2) // 2
         cy = (y1 + y2) // 2
 
-        has_stroke = block.stroke_color is not None or block.type == "sfx"
+        draw_tmp = ImageDraw.Draw(pil_img)
+        has_stroke = block.stroke_color is not None or block.type == "sfx" or block.draw_backdrop
         lines, font, text_w, text_h, line_spacing = fit_text_in_balloon(
-            draw,
+            draw_tmp,
             text,
             bw,
             bh,
-            is_sfx=(block.type == "sfx"),
+            is_sfx=(block.type == "sfx" and not block.draw_backdrop),
             has_stroke=has_stroke
         )
 
@@ -269,32 +271,61 @@ def render_typesetting(img_bgr: np.ndarray, blocks: List[TextBlock]) -> np.ndarr
         stroke_w = max(2, int(font_size * 0.11)) if has_stroke else 0
         stroke_fill = block.stroke_color if block.stroke_color is not None else (0, 0, 0)
 
-        # Centrado vertical respecto al centro de la región
-        curr_y = cy - text_h // 2
+        # Ajustar centro para que el bloque entero nunca se salga de los bordes de la imagen
+        curr_y = max(6, min(im_h - text_h - 6, cy - text_h // 2))
+        eff_cx = max(text_w // 2 + 10, min(im_w - text_w // 2 - 10, cx))
 
+        # Si el texto flota sobre ilustración colorida (sin globo), dibujar tarjeta translúcida legible
+        if block.draw_backdrop:
+            pad_x = max(10, int(font_size * 0.55))
+            pad_y = max(8, int(font_size * 0.45))
+            rx1 = max(2, eff_cx - text_w // 2 - pad_x)
+            ry1 = max(2, curr_y - pad_y)
+            rx2 = min(im_w - 2, eff_cx + text_w // 2 + pad_x)
+            ry2 = min(im_h - 2, curr_y + text_h + pad_y)
+
+            overlay = Image.new("RGBA", pil_img.size, (0, 0, 0, 0))
+            ov_draw = ImageDraw.Draw(overlay)
+            border_c = (*block.stroke_color, 235) if block.stroke_color is not None else (129, 140, 248, 220)
+            radius = max(8, int(font_size * 0.50))
+            ov_draw.rounded_rectangle(
+                [rx1, ry1, rx2, ry2],
+                radius=radius,
+                fill=(14, 16, 24, 185),
+                outline=border_c,
+                width=max(2, int(font_size * 0.09))
+            )
+            pil_img = Image.alpha_composite(pil_img, overlay)
+            text_fill = (255, 255, 255, 255)
+            stroke_fill_rgba = (0, 0, 0, 255)
+        else:
+            text_fill = (*block.text_color, 255)
+            stroke_fill_rgba = (*stroke_fill, 255)
+
+        draw = ImageDraw.Draw(pil_img)
         for line in lines:
             l_bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_w)
             lw = l_bbox[2] - l_bbox[0]
             lh = l_bbox[3] - l_bbox[1]
-            line_x = cx - lw // 2
+            line_x = max(4, min(im_w - lw - 4, eff_cx - lw // 2))
 
             if stroke_w > 0:
                 draw.text(
                     (line_x, curr_y),
                     line,
                     font=font,
-                    fill=block.text_color,
+                    fill=text_fill,
                     stroke_width=stroke_w,
-                    stroke_fill=stroke_fill
+                    stroke_fill=stroke_fill_rgba
                 )
             else:
                 draw.text(
                     (line_x, curr_y),
                     line,
                     font=font,
-                    fill=block.text_color
+                    fill=text_fill
                 )
             curr_y += lh + line_spacing
 
-    out_rgb = np.array(pil_img)
+    out_rgb = np.array(pil_img.convert("RGB"))
     return cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)

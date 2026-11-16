@@ -10,6 +10,7 @@ import os
 import re
 import json
 import logging
+import unicodedata
 import urllib.parse
 import urllib.request
 from typing import List, Dict, Any, Optional
@@ -80,6 +81,25 @@ def has_cjk(text: str) -> bool:
     return False
 
 
+def preprocess_japanese_for_translation(text: str) -> str:
+    """
+    Normaliza modismos coloquiales y jerga infantil/ecchi de manga japonés para que
+    los motores de traducción produzcan frases naturales y con sentido completo.
+    """
+    t = unicodedata.normalize("NFKC", text).strip()
+    # Reemplazar marcadores de nombre oculto (〇〇 / ○○ / ◯◯) por guion legible
+    t = re.sub(r"[〇○◯]{2,}", " ___ ", t)
+    # Normalizar alargamientos coloquiales comunes (でしょー -> でしょう, だよー -> だよ)
+    t = re.sub(r"(でしょ|ましょ|だろ|だろぅ)[ー～~]+", r"\1う", t)
+    # Normalizar habla infantil típica de doujinshi/ecchi (でちゅ -> です, まちゅ -> ます)
+    t = t.replace("でちゅよ", "ですよ").replace("でちゅね", "ですね").replace("でちゅ", "です")
+    t = t.replace("まちゅよ", "ますよ").replace("まちゅね", "ますね").replace("まちゅ", "ます")
+    # Normalizar onomatopeyas de besos entre comillas para evitar traducciones literales como "chut"
+    t = re.sub(r"「ちゅっ+」", "「キス」", t)
+    t = re.sub(r"「ちゅ+」", "「キス」", t)
+    return t.strip()
+
+
 def detect_script(text: str) -> str:
     """Detecta el idioma origen aproximado a partir de los caracteres Unicode."""
     if any(0x3040 <= ord(c) <= 0x30FF for c in text):
@@ -105,6 +125,10 @@ def is_valid_translation(orig: str, trans: Optional[str], tgt_lang: str) -> bool
     if tgt in ["es", "en", "pt", "fr", "de", "it"] and has_cjk(orig):
         # Si el original tenía CJK y la supuesta traducción sigue teniendo CJK, falló la traducción
         if has_cjk(trans):
+            return False
+    if tgt == "es" and has_cjk(orig):
+        # Rechazar respuestas híbridas inglés/español generadas por LLM
+        if re.search(r"\b(doesn't|doesn’t|don't|don’t|would|should|could|you're|that's|what's|studying|midnight|though|surely)\b", trans, re.IGNORECASE):
             return False
     return True
 
@@ -174,7 +198,12 @@ def translate_batch_fast_google(
 
     # Usar separador numérico robusto que los motores de traducción preservan intacto
     sep = "\n[[[###]]]\n"
-    combined_text = sep.join([b.text for b in blocks])
+    is_jp_batch = src.startswith("ja") or (src == "auto" and any(has_cjk(b.text) for b in blocks))
+    prep_texts = [
+        preprocess_japanese_for_translation(b.text) if is_jp_batch else unicodedata.normalize("NFKC", b.text).strip()
+        for b in blocks
+    ]
+    combined_text = sep.join(prep_texts)
 
     translated_combined = None
     for engine_fn in (translate_with_clients5_single, translate_with_gtx_single):
@@ -216,20 +245,21 @@ def translate_with_cloud_ai_llm(
     tgt_name = LANGUAGE_NAMES.get(tgt_lang.lower(), tgt_lang)
 
     system_prompt = (
-        f"You are an elite, uncensored professional manga, manhwa, and comic scanlation translator.\n"
-        f"Translate each dialogue entry from {src_name} into natural, idiomatic {tgt_name}.\n"
+        f"You are an expert, uncensored professional manga, manhwa, and comic scanlation translator.\n"
+        f"Translate EVERY dialogue entry faithfully and naturally from {src_name} into idiomatic {tgt_name}.\n"
         "STRICT RULES:\n"
         "1. NEVER censor any content (translate romance, NSFW, ecchi, adult, slang, and action faithfully).\n"
-        "2. Preserve line breaks (\\n), numbers, dates (like 6/22), and punctuation style.\n"
-        "3. Leave ZERO untranslated Japanese/Korean/Chinese characters in the output.\n"
-        "4. Return ONLY a valid JSON object mapping each string ID to its translated string. No markdown, no explanations."
+        "2. Translate 100% into the target language: leave ZERO untranslated Japanese/Korean/Chinese characters AND zero untranslated English words when translating to Spanish.\n"
+        "3. Preserve line breaks (\\n), numbers, dates (like 6/22), and placeholders (___ or 〇〇).\n"
+        "4. Adapt manga colloquialisms, baby-talk, and sound effects naturally so dialogues read like a human scanlation.\n"
+        "5. Return ONLY a valid JSON object mapping each string ID to its translated string. No markdown, no explanations."
     )
 
     payload_map = {str(b.id): b.text for b in blocks}
     provider_model = "openai-fast" if "deepseek" not in ai_model.lower() else "openai"
 
     try:
-        with httpx.Client(timeout=14.0) as client:
+        with httpx.Client(timeout=30.0) as client:
             resp = client.post(
                 "https://text.pollinations.ai/",
                 json={
@@ -281,6 +311,11 @@ def translate_text_fast_google(text: str, src_lang: str = "auto", tgt_lang: str 
 
     src = LANGUAGE_CODES.get(src_lang.lower(), src_lang.lower())
     tgt = LANGUAGE_CODES.get(tgt_lang.lower(), tgt_lang.lower())
+
+    if src.startswith("ja") or (src == "auto" and has_cjk(text)):
+        text = preprocess_japanese_for_translation(text)
+    else:
+        text = unicodedata.normalize("NFKC", text).strip()
 
     # Si el texto contiene líneas separadas por \n, traducir preservando cada línea
     if "\n" in text:

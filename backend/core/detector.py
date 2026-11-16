@@ -22,6 +22,8 @@ class TextBlock:
     stroke_color: Optional[Tuple[int, int, int]] = None
     is_uniform_bg: bool = True
     contour: np.ndarray = None
+    render_box: Optional[Tuple[int, int, int, int]] = None
+    draw_backdrop: bool = False
 
 
 def calculate_region_variance(img_gray: np.ndarray, box: Tuple[int, int, int, int]) -> float:
