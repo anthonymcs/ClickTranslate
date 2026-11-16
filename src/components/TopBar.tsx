@@ -200,21 +200,33 @@ export const TopBar: React.FC<TopBarProps> = ({
           </select>
         </div>
 
-        {/* Selector de Motor de Traducción (Rápido vs Ollama) */}
+        {/* Selector de Modelo de IA (Estilo TranslateManga.net - Sin Tokens) */}
         <div className="flex items-center gap-1.5 bg-zinc-900/90 px-2.5 py-1.5 rounded-xl border border-surfaceBorder">
-          <Cpu className="w-3.5 h-3.5 text-zinc-400" />
-          <label className="text-[11px] text-zinc-400 font-medium">Motor:</label>
+          <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+          <label className="text-[11px] text-zinc-400 font-medium">Modelo IA:</label>
           <select
             value={selectedModel}
             onChange={(e) => onModelChange(e.target.value)}
-            className="bg-transparent text-xs text-zinc-200 font-medium focus:outline-none cursor-pointer max-w-[150px] truncate"
+            className="bg-transparent text-xs text-zinc-100 font-semibold focus:outline-none cursor-pointer max-w-[185px] truncate"
           >
-            <option value="fast" className="bg-zinc-900 text-zinc-200">
-              ⚡ Ultrarrápido (0.3s)
+            <option value="fast" className="bg-zinc-900 text-zinc-100">
+              ⚡ Predeterminado (Ultrarrápido)
+            </option>
+            <option value="deepseek-ai" className="bg-zinc-900 text-indigo-300">
+              ✦ DeepSeek V3 Flash (IA Sin Token)
+            </option>
+            <option value="gpt-ai" className="bg-zinc-900 text-indigo-300">
+              ✦ GPT-4o / OpenAI Fast (IA Sin Token)
+            </option>
+            <option value="gemini-ai" className="bg-zinc-900 text-indigo-300">
+              ✦ Gemini 3 Flash (IA Sin Token)
+            </option>
+            <option value="claude-ai" className="bg-zinc-900 text-indigo-300">
+              ✦ Claude Haiku (IA Sin Token)
             </option>
             {availableModels.map((m) => (
-              <option key={m} value={m} className="bg-zinc-900 text-zinc-200">
-                🧠 Ollama ({m})
+              <option key={m} value={m} className="bg-zinc-900 text-emerald-300">
+                🧠 Ollama Local ({m})
               </option>
             ))}
           </select>

@@ -4,7 +4,7 @@ Genera máscaras binarias para inpainting y ordena los bloques según el sentido
 """
 
 from dataclasses import dataclass
-from typing import List, Tuple, Literal
+from typing import List, Tuple, Literal, Optional
 import cv2
 import numpy as np
 
@@ -19,6 +19,7 @@ class TextBlock:
     translated_text: str = ""
     bg_color: Tuple[int, int, int] = (255, 255, 255)
     text_color: Tuple[int, int, int] = (0, 0, 0)
+    stroke_color: Optional[Tuple[int, int, int]] = None
     is_uniform_bg: bool = True
     contour: np.ndarray = None
 

@@ -119,45 +119,82 @@ def process_single_image_in_memory(
             x1, y1, x2, y2 = cb["box"]
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(im_w, x2), min(im_h, y2)
-            if x2 - x1 < 5 or y2 - y1 < 5:
+            bw, bh = x2 - x1, y2 - y1
+            if bw < 10 or bh < 10:
                 continue
 
             crop_bgr = img_bgr[y1:y2, x1:x2]
-            crop_gray = gray[y1:y2, x1:x2]
-            dom_color, is_uniform = get_dominant_bg_color(img_bgr, (x1, y1, x2, y2))
+            is_vertical = bool(cb.get("vertical", False))
+            cb_lines = cb.get("lines", [])
 
             center_pt = ((x1 + x2) // 2, (y1 + y2) // 2)
             matching_balloon = None
+            matching_cnt = None
             for cnt, bbox in balloon_contours:
+                bx_c, by_c, bx2_c, by2_c = bbox
+                bw_c, bh_c = bx2_c - bx_c, by2_c - by_c
                 if cv2.pointPolygonTest(cnt, center_pt, False) >= 0:
-                    matching_balloon = bbox
-                    break
+                    if (bw_c * bh_c) <= (bw * bh * 5.5):
+                        matching_balloon = bbox
+                        matching_cnt = cnt
+                        break
 
-            if matching_balloon:
-                block_type = "dialog"
-                bx1, by1, bx2, by2 = matching_balloon
-                eff_box = (bx1 + 4, max(y1, by1 + 4), bx2 - 4, min(y2, by2 - 4))
-            else:
-                if is_uniform and float(np.mean(dom_color)) > 210:
-                    block_type = "dialog"
-                else:
-                    block_type = "sfx"
-                eff_box = (x1, y1, x2, y2)
-
-            # OCR Inteligente Multi-idioma con enrutamiento automático
+            # OCR Inteligente Multi-idioma con soporte por línea en bloques horizontales
             def contains_kana(txt: str) -> bool:
                 return any((0x3040 <= ord(c) <= 0x309F) or (0x30A0 <= ord(c) <= 0x30FF) for c in txt)
 
-            extracted_text = ""
-            if is_japanese:
-                # Si el usuario seleccionó explícitamente Japonés, priorizar Manga-OCR
-                if manga_engine is not None and crop_bgr.size > 0:
+            def ocr_japanese_crop(c_bgr: np.ndarray) -> str:
+                nonlocal manga_engine
+                if c_bgr.size == 0:
+                    return ""
+                if manga_engine is None:
+                    manga_engine = get_manga_ocr()
+                if manga_engine is not None:
                     try:
-                        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-                        pil_crop = Image.fromarray(crop_rgb)
-                        extracted_text = manga_engine(pil_crop).strip()
+                        c_rgb = cv2.cvtColor(c_bgr, cv2.COLOR_BGR2RGB)
+                        return manga_engine(Image.fromarray(c_rgb)).strip()
                     except Exception as e:
                         logger.warning(f"Error Manga-OCR: {e}")
+                return ""
+
+            extracted_text = ""
+            if is_japanese:
+                # Si es un bloque horizontal con múltiples líneas (ej. fecha + subtítulo), leer línea por línea sin duplicados
+                if not is_vertical and len(cb_lines) > 1:
+                    raw_lboxes = []
+                    for poly in cb_lines:
+                        pts = np.array(poly)
+                        lx1, ly1 = max(0, int(pts[:, 0].min()) - 4), max(0, int(pts[:, 1].min()) - 4)
+                        lx2, ly2 = min(im_w, int(pts[:, 0].max()) + 4), min(im_h, int(pts[:, 1].max()) + 4)
+                        if lx2 - lx1 >= 12 and ly2 - ly1 >= 12:
+                            raw_lboxes.append([ly1, lx1, lx2, ly2])
+                    raw_lboxes.sort(key=lambda b: b[0])
+                    # Fusionar líneas que se solapen verticalmente (> 45% de su altura)
+                    dedup_lboxes = []
+                    for lb in raw_lboxes:
+                        if not dedup_lboxes:
+                            dedup_lboxes.append(lb)
+                        else:
+                            prev = dedup_lboxes[-1]
+                            ov_y = max(0, min(prev[3], lb[3]) - max(prev[0], lb[0]))
+                            min_h = min(prev[3] - prev[0], lb[3] - lb[0])
+                            if min_h > 0 and (ov_y / min_h) >= 0.45:
+                                prev[0] = min(prev[0], lb[0])
+                                prev[1] = min(prev[1], lb[1])
+                                prev[2] = max(prev[2], lb[2])
+                                prev[3] = max(prev[3], lb[3])
+                            else:
+                                dedup_lboxes.append(lb)
+                    line_texts = []
+                    for (ly1, lx1, lx2, ly2) in dedup_lboxes:
+                        lt = ocr_japanese_crop(img_bgr[ly1:ly2, lx1:lx2])
+                        if lt:
+                            line_texts.append(unicodedata.normalize("NFKC", lt).strip())
+                    extracted_text = "\n".join(line_texts).strip()
+
+                if not extracted_text:
+                    extracted_text = ocr_japanese_crop(crop_bgr)
+
                 if not extracted_text and rapid_engine is not None and crop_bgr.size > 0:
                     r_res, _ = rapid_engine(crop_bgr)
                     if r_res:
@@ -168,7 +205,6 @@ def process_single_image_in_memory(
                     try:
                         r_res, _ = rapid_engine(crop_bgr)
                         if r_res:
-                            # Agrupar en líneas por proximidad vertical Y (tolerancia 7px)
                             lines_grouped = []
                             for item in r_res:
                                 iy = item[0][0][1]
@@ -191,19 +227,23 @@ def process_single_image_in_memory(
                     except Exception as e:
                         logger.warning(f"Error RapidOCR: {e}")
 
-                # Si en modo 'auto' el texto extraído contiene Kana japonés, o si es japonés explícito, usar Manga-OCR
-                if (is_japanese or (lang_code == "auto" and contains_kana(extracted_text))):
-                    if manga_engine is None:
-                        manga_engine = get_manga_ocr()
-                    if manga_engine is not None and crop_bgr.size > 0:
-                        try:
-                            crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-                            pil_crop = Image.fromarray(crop_rgb)
-                            m_txt = manga_engine(pil_crop).strip()
-                            if m_txt and contains_kana(m_txt):
-                                extracted_text = m_txt
-                        except Exception as e:
-                            logger.warning(f"Error Manga-OCR fallback: {e}")
+                # Si en modo 'auto' el texto extraído contiene Kana japonés, usar Manga-OCR
+                if lang_code == "auto" and contains_kana(extracted_text):
+                    if not is_vertical and len(cb_lines) > 1:
+                        line_boxes = []
+                        for poly in cb_lines:
+                            pts = np.array(poly)
+                            lx1, ly1 = max(0, int(pts[:, 0].min()) - 4), max(0, int(pts[:, 1].min()) - 4)
+                            lx2, ly2 = min(im_w, int(pts[:, 0].max()) + 4), min(im_h, int(pts[:, 1].max()) + 4)
+                            if lx2 - lx1 >= 8 and ly2 - ly1 >= 8:
+                                line_boxes.append((ly1, lx1, lx2, ly2))
+                        line_boxes.sort(key=lambda b: b[0])
+                        line_texts = [ocr_japanese_crop(img_bgr[ly1:ly2, lx1:lx2]) for (ly1, lx1, lx2, ly2) in line_boxes]
+                        m_txt = "\n".join([t for t in line_texts if t]).strip()
+                    else:
+                        m_txt = ocr_japanese_crop(crop_bgr)
+                    if m_txt and contains_kana(m_txt):
+                        extracted_text = m_txt
 
             # Normalizar NFKC estrictamente para eliminar fullwidth characters (evita cuadrados/tofu)
             extracted_text = unicodedata.normalize("NFKC", extracted_text).strip()
@@ -211,33 +251,132 @@ def process_single_image_in_memory(
             if not extracted_text:
                 continue
 
-            # Inpainting profesional TranslateManga: limpieza impecable de globos sin residuos de texto
-            if block_type == "dialog":
-                p_gray = gray[y1:y2, x1:x2]
-                bg_bright = sum(dom_color) / 3.0
-                if bg_bright > 175 or is_uniform:
-                    # Rango ampliado a 215 y 2 iteraciones de dilatación para eliminar halos grises anti-alias
-                    t_mask = (p_gray < 215).astype(np.uint8)
-                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-                    dilated = cv2.dilate(t_mask, kernel, iterations=2)
-                    target_color = (255, 255, 255) if bg_bright > 185 else dom_color
-                    cleaned_img[y1:y2, x1:x2][dilated > 0] = target_color
-                else:
-                    sub_m = text_mask[y1:y2, x1:x2]
-                    if np.count_nonzero(sub_m) > 0:
-                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-                        dilated = cv2.dilate(sub_m, kernel, iterations=2)
-                        inpainted = cv2.inpaint(cleaned_img[y1:y2, x1:x2], dilated, 3, cv2.INPAINT_TELEA)
-                        cleaned_img[y1:y2, x1:x2] = inpainted
-            else:
-                sub_m = text_mask[y1:y2, x1:x2]
-                if np.count_nonzero(sub_m) > 0:
-                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-                    dilated = cv2.dilate(sub_m, kernel, iterations=2)
-                    inpainted = cv2.inpaint(cleaned_img[y1:y2, x1:x2], dilated, 3, cv2.INPAINT_TELEA)
-                    cleaned_img[y1:y2, x1:x2] = inpainted
+            # Análisis cromático de precisión: separar núcleo de letra, contorno (stroke/glow) y fondo real
+            pad = max(8, int(min(bw, bh) * 0.10))
+            px1, py1 = max(0, x1 - pad), max(0, y1 - pad)
+            px2, py2 = min(im_w, x2 + pad), min(im_h, y2 + pad)
 
-            text_color = (0, 0, 0) if block_type == "dialog" else (255, 255, 255)
+            sub_orig = img_bgr[py1:py2, px1:px2]
+            sub_mask = text_mask[py1:py2, px1:px2]
+
+            r_stroke = max(6, min(24, int(min(bw, bh) * 0.14)))
+            k_search = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_stroke + 1, 2 * r_stroke + 1))
+            search_zone = cv2.dilate(sub_mask, k_search, iterations=1) if np.count_nonzero(sub_mask) > 0 else np.zeros_like(sub_mask)
+
+            bg_pixels = sub_orig[search_zone == 0]
+            if len(bg_pixels) > 10:
+                bg_median = np.median(bg_pixels, axis=0).astype(np.uint8)
+                bg_dists = np.linalg.norm(bg_pixels.astype(np.float32) - bg_median.astype(np.float32), axis=1)
+                uniform_ratio = float(np.mean(bg_dists < 16.0))
+            else:
+                dom_c, unif_c = get_dominant_bg_color(img_bgr, (x1, y1, x2, y2))
+                bg_median = np.array(dom_c, dtype=np.uint8)
+                uniform_ratio = 0.90 if unif_c else 0.30
+
+            bg_bright = float(np.mean(bg_median))
+            dom_color = (int(bg_median[0]), int(bg_median[1]), int(bg_median[2]))
+            is_uniform = uniform_ratio >= 0.80
+
+            # Extraer color de letra y color de contorno antes de limpiar
+            core_px = sub_orig[sub_mask > 127]
+            fg_bgr = np.median(core_px, axis=0).astype(int) if len(core_px) > 5 else (np.array([0, 0, 0]) if bg_bright > 160 else np.array([255, 255, 255]))
+
+            k_in = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            k_mid = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(9, r_stroke | 1), max(9, r_stroke | 1)))
+            ring_zone = (cv2.dilate(sub_mask, k_mid) > 0) & (cv2.dilate(sub_mask, k_in) == 0)
+            ring_px = sub_orig[ring_zone]
+            stroke_bgr = None
+            if len(ring_px) > 10:
+                ring_diff = np.linalg.norm(ring_px.astype(np.float32) - bg_median.astype(np.float32), axis=1)
+                stroke_candidates = ring_px[ring_diff > 35.0]
+                if len(stroke_candidates) > 8:
+                    stroke_bgr = np.percentile(stroke_candidates, 75, axis=0).astype(int)
+
+            # Verificar color de fondo interior inmediato dentro de la caja (para distinguir mini-globos blancos de fondos crema)
+            inner_tmask = text_mask[y1:y2, x1:x2]
+            k_inner_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            inner_free = cv2.dilate(inner_tmask, k_inner_dil, iterations=1) == 0
+            inner_bg_px = img_bgr[y1:y2, x1:x2][inner_free]
+            if len(inner_bg_px) > 12:
+                local_bg_median = np.median(inner_bg_px, axis=0).astype(np.uint8)
+            else:
+                local_bg_median = bg_median
+
+            fg_sat = int(np.max(fg_bgr)) - int(np.min(fg_bgr))
+
+            # Clasificación de bloque y limpieza visual impecable
+            is_dark_neutral_text = (float(np.mean(fg_bgr)) < 115.0) and (fg_sat < 45)
+            if matching_balloon or (is_uniform and bg_bright > 195 and is_dark_neutral_text):
+                block_type = "dialog"
+                if matching_balloon:
+                    bx1, by1, bx2, by2 = matching_balloon
+                    eff_box = (bx1 + 6, max(y1, by1 + 6), bx2 - 6, min(y2, by2 - 6))
+                else:
+                    eff_box = (x1, y1, x2, y2)
+
+                text_color = (0, 0, 0)
+                stroke_color = None
+                fill_c = (255, 255, 255) if bg_bright > 210 else dom_color
+
+                # Si tenemos el contorno exacto del globo, rellenar su interior erosionado 2px (borra 100% del texto sin tocar el borde negro)
+                if matching_cnt is not None:
+                    b_mask = np.zeros_like(gray)
+                    cv2.drawContours(b_mask, [matching_cnt], -1, 255, cv2.FILLED)
+                    k_erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                    b_eroded = cv2.erode(b_mask, k_erode, iterations=1)
+                    cleaned_img[b_eroded > 0] = fill_c
+                else:
+                    p_gray = gray[y1:y2, x1:x2]
+                    if np.count_nonzero(inner_tmask) > 0:
+                        k_guide = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+                        guide_zone = cv2.dilate(inner_tmask, k_guide, iterations=1)
+                        erase_m = (guide_zone > 0) & (p_gray < 235)
+                    else:
+                        erase_m = p_gray < 220
+                    cleaned_img[y1:y2, x1:x2][erase_m] = fill_c
+            else:
+                block_type = "sfx"
+                eff_box = (x1, y1, x2, y2)
+
+                if float(np.mean(fg_bgr)) > 175:
+                    text_color = (255, 255, 255)
+                    stroke_color = (int(stroke_bgr[2]), int(stroke_bgr[1]), int(stroke_bgr[0])) if stroke_bgr is not None else (0, 0, 0)
+                else:
+                    text_color = (int(fg_bgr[2]), int(fg_bgr[1]), int(fg_bgr[0]))
+                    stroke_color = (int(stroke_bgr[2]), int(stroke_bgr[1]), int(stroke_bgr[0])) if stroke_bgr is not None else (255, 255, 255)
+
+                if bg_bright > 180 and (fg_sat > 25 or (stroke_bgr is not None and (int(np.max(stroke_bgr)) - int(np.min(stroke_bgr))) > 25)):
+                    # Texto o SFX a color sobre fondo claro o dentro de mini-globo blanco:
+                    sub_clean = cleaned_img[py1:py2, px1:px2]
+                    sub_g = gray[py1:py2, px1:px2]
+                    sub_sat = np.max(sub_clean, axis=2).astype(int) - np.min(sub_clean, axis=2).astype(int)
+                    is_black_lineart = (sub_g < 232) & (sub_sat < 18)
+                    has_balloon_border = float(np.mean((sub_g < 180) & (sub_sat < 18))) >= 0.02
+                    target_fill = np.array([255, 255, 255], dtype=np.uint8) if has_balloon_border else bg_median
+                    diff_target = np.linalg.norm(sub_clean.astype(np.float32) - target_fill.astype(np.float32), axis=2)
+                    if has_balloon_border:
+                        # Dentro de mini-globo con borde negro: borrar solo píxeles saturados (texto rosa/rojo) dentro del globo
+                        erase_m = (search_zone > 0) & (~is_black_lineart) & (sub_sat >= 18)
+                    else:
+                        # SFX libre sobre fondo crema/claro: borrar tanto el color como su halo blanco hacia el color exacto del fondo
+                        erase_m = (search_zone > 0) & (~is_black_lineart) & ((sub_sat >= 16) | (diff_target > 6.0))
+                    sub_clean[erase_m] = target_fill
+                    cleaned_img[py1:py2, px1:px2] = sub_clean
+                elif is_uniform:
+                    # Fondo uniforme (oscuro, negro o sólido): reemplazar núcleo + contorno con el color exacto del fondo (bg_median)
+                    sub_clean = cleaned_img[py1:py2, px1:px2]
+                    diff_all = np.linalg.norm(sub_clean.astype(np.float32) - bg_median.astype(np.float32), axis=2)
+                    erase_m = (search_zone > 0) & (diff_all > 6.0)
+                    sub_clean[erase_m] = bg_median
+                    cleaned_img[py1:py2, px1:px2] = sub_clean
+                else:
+                    # Fondo con dibujo artístico complejo: dilatar máscara para cubrir todo el stroke antes de Telea
+                    if np.count_nonzero(sub_mask) > 0:
+                        r_inp = max(5, min(16, int(min(bw, bh) * 0.12)))
+                        k_inp = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_inp + 1, 2 * r_inp + 1))
+                        dilated = cv2.dilate(sub_mask, k_inp, iterations=1)
+                        inpainted = cv2.inpaint(cleaned_img[py1:py2, px1:px2], dilated, 5, cv2.INPAINT_TELEA)
+                        cleaned_img[py1:py2, px1:px2] = inpainted
 
             tb = TextBlock(
                 id=idx + 1,
@@ -246,6 +385,7 @@ def process_single_image_in_memory(
                 text=extracted_text,
                 bg_color=dom_color,
                 text_color=text_color,
+                stroke_color=stroke_color,
                 is_uniform_bg=is_uniform
             )
             raw_blocks.append(tb)

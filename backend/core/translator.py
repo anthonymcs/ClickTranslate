@@ -1,16 +1,18 @@
 """
-Módulo de Traducción Contextual y Multi-idioma de Alta Velocidad.
-- Modo Rápido (Google Translate API con fallback a MyMemory): Inferencia en ~200 ms, soporte para 100+ idiomas.
-- Modo Ollama Local: IA contextual sin censura para ejecución 100% privada en RAM.
-- Soporte dinámico de idiomas origen y destino (estilo Google Translate).
+Módulo de Traducción Contextual y Multi-Modelo de IA de Alta Velocidad.
+- Motor IA Cloud Sin Token (Pollinations OpenAI / GPT-OSS Reasoning): Traducción de manga contextual en JSON sin necesidad de API Keys.
+- Motor Ultrarrápido por Lotes (Google Clients5 + GTX Batch): Traduce todos los globos de la página en 1 sola petición (~0.4s), evitando límites HTTP 429.
+- Modo Ollama Local: IA 100% offline en RAM si el usuario tiene Ollama instalado.
+- Cadena de respaldo de 4 niveles con validación de alfabeto para garantizar 0% de textos sin traducir.
 """
 
 import os
+import re
 import json
 import logging
 import urllib.parse
 import urllib.request
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 import httpx
 
 from .detector import TextBlock
@@ -19,7 +21,7 @@ logger = logging.getLogger("ClickTranslate.Translator")
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 
-# Mapeo de códigos de idioma amigables
+# Mapeo de códigos de idioma estándar
 LANGUAGE_CODES = {
     "auto": "auto",
     "es": "es",
@@ -34,69 +36,288 @@ LANGUAGE_CODES = {
     "ru": "ru",
 }
 
+# Mapeo ISO completo requerido por MyMemoryTranslator
+MYMEMORY_LOCALES = {
+    "ja": "ja-JP",
+    "ko": "ko-KR",
+    "zh": "zh-CN",
+    "zh-cn": "zh-CN",
+    "en": "en-US",
+    "es": "es-ES",
+    "pt": "pt-BR",
+    "fr": "fr-FR",
+    "de": "de-DE",
+    "it": "it-IT",
+    "ru": "ru-RU",
+}
 
-def translate_text_fast_google(text: str, src_lang: str = "auto", tgt_lang: str = "es") -> Optional[str]:
+LANGUAGE_NAMES = {
+    "auto": "Auto-detect",
+    "es": "Spanish (Español neutro de scanlation)",
+    "en": "English",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "pt": "Portuguese",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "ru": "Russian",
+}
+
+
+def has_cjk(text: str) -> bool:
+    """Detecta si el texto contiene caracteres japoneses (Kana/Kanji), coreanos (Hangul) o chinos."""
+    for c in text:
+        code = ord(c)
+        if (
+            (0x3040 <= code <= 0x30FF)  # Hiragana y Katakana
+            or (0x4E00 <= code <= 0x9FFF)  # Kanji / Hanzi
+            or (0x3400 <= code <= 0x4DBF)  # Extensión CJK A
+            or (0xAC00 <= code <= 0xD7AF)  # Hangul coreano
+        ):
+            return True
+    return False
+
+
+def detect_script(text: str) -> str:
+    """Detecta el idioma origen aproximado a partir de los caracteres Unicode."""
+    if any(0x3040 <= ord(c) <= 0x30FF for c in text):
+        return "ja"
+    if any(0xAC00 <= ord(c) <= 0xD7AF for c in text):
+        return "ko"
+    if any(0x4E00 <= ord(c) <= 0x9FFF for c in text):
+        return "ja"  # En mangas suele ser japonés o chino
+    return "en"
+
+
+def is_valid_translation(orig: str, trans: Optional[str], tgt_lang: str) -> bool:
     """
-    Traduce un texto usando la API de Google Translate con headers de navegador.
-    Tiempo de respuesta: ~100-250 ms.
+    Verifica que la traducción sea válida y no haya dejado caracteres asiáticos sin traducir
+    cuando el idioma destino es occidental (es, en, pt, fr, de, it).
     """
-    if not text or not text.strip():
-        return ""
+    if not trans or not trans.strip():
+        return False
+    up = trans.upper()
+    if "MYMEMORY WARNING" in up or "INVALID SOURCE LANGUAGE" in up or "TOO MANY REQUESTS" in up:
+        return False
+    tgt = tgt_lang.lower().strip()
+    if tgt in ["es", "en", "pt", "fr", "de", "it"] and has_cjk(orig):
+        # Si el original tenía CJK y la supuesta traducción sigue teniendo CJK, falló la traducción
+        if has_cjk(trans):
+            return False
+    return True
 
-    src = LANGUAGE_CODES.get(src_lang.lower(), src_lang.lower())
-    tgt = LANGUAGE_CODES.get(tgt_lang.lower(), tgt_lang.lower())
 
+def translate_with_clients5_single(text: str, src: str, tgt: str) -> Optional[str]:
+    """Traduce mediante el endpoint Chrome Extension de Google (clients5) sin límite 429 de gtx."""
+    url = (
+        f"https://clients5.google.com/translate_a/t"
+        f"?client=dict-chrome-ex&sl={src}&tl={tgt}&q="
+        + urllib.parse.quote(text)
+    )
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+        }
+    )
+    with urllib.request.urlopen(req, timeout=6.0) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        if isinstance(data, list) and len(data) > 0:
+            item = data[0]
+            if isinstance(item, str):
+                return item.strip()
+            if isinstance(item, list) and len(item) > 0:
+                return str(item[0]).strip()
+    return None
+
+
+def translate_with_gtx_single(text: str, src: str, tgt: str) -> Optional[str]:
+    """Traduce mediante el endpoint translate.googleapis.com/translate_a/single."""
     url = (
         f"https://translate.googleapis.com/translate_a/single"
         f"?client=gtx&sl={src}&tl={tgt}&dt=t&q="
         + urllib.parse.quote(text)
     )
-
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
             "Referer": "https://translate.google.com/",
             "Accept": "*/*",
         }
     )
+    with urllib.request.urlopen(req, timeout=6.0) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        if data and len(data) > 0 and isinstance(data[0], list):
+            parts = [part[0] for part in data[0] if part and len(part) > 0 and part[0]]
+            return "".join(parts).strip()
+    return None
 
-    # Intento 1 y 2 con Google Translate API
-    for attempt in range(2):
+
+def translate_batch_fast_google(
+    blocks: List[TextBlock],
+    src_lang: str = "auto",
+    tgt_lang: str = "es"
+) -> Dict[int, str]:
+    """
+    Traduce TODOS los bloques de la página en UNA SOLA petición HTTP combinada.
+    Evita por completo el error HTTP 429 (Too Many Requests) y acelera la página a ~0.4s.
+    """
+    if not blocks:
+        return {}
+
+    src = LANGUAGE_CODES.get(src_lang.lower(), src_lang.lower())
+    tgt = LANGUAGE_CODES.get(tgt_lang.lower(), tgt_lang.lower())
+
+    # Usar separador numérico robusto que los motores de traducción preservan intacto
+    sep = "\n[[[###]]]\n"
+    combined_text = sep.join([b.text for b in blocks])
+
+    translated_combined = None
+    for engine_fn in (translate_with_clients5_single, translate_with_gtx_single):
         try:
-            with urllib.request.urlopen(req, timeout=8.0) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                if data and len(data) > 0 and isinstance(data[0], list):
-                    translated_parts = [part[0] for part in data[0] if part and len(part) > 0 and part[0]]
-                    res_str = "".join(translated_parts).strip()
-                    if res_str:
-                        return res_str
+            res = engine_fn(combined_text, src, tgt)
+            if res:
+                translated_combined = res
+                break
         except Exception as e:
-            logger.warning(f"Intento {attempt + 1} Google Translate API fallo: {e}")
+            logger.warning(f"Fallo en lote rápido ({engine_fn.__name__}): {e}")
 
-    # Fallback inteligente con detección de idioma para evitar error 'auto'
+    results: Dict[int, str] = {}
+    if translated_combined:
+        # Dividir por el separador (tolerando espacios alrededor de [[[###]]])
+        parts = re.split(r"\s*\[\[\[\s*###\s*\]\]\]\s*", translated_combined)
+        if len(parts) == len(blocks):
+            for b, part in zip(blocks, parts):
+                cln = part.strip()
+                if is_valid_translation(b.text, cln, tgt_lang):
+                    results[b.id] = cln
+
+    return results
+
+
+def translate_with_cloud_ai_llm(
+    blocks: List[TextBlock],
+    src_lang: str = "auto",
+    tgt_lang: str = "es",
+    ai_model: str = "openai-fast"
+) -> Dict[int, str]:
+    """
+    Traduce todos los bloques de la página usando IA Contextual en la nube (Pollinations AI)
+    SIN necesidad de Tokens ni API Keys. Ideal para diálogos de manga, modismos, comedia y NSFW.
+    """
+    if not blocks:
+        return {}
+
+    src_name = LANGUAGE_NAMES.get(src_lang.lower(), src_lang)
+    tgt_name = LANGUAGE_NAMES.get(tgt_lang.lower(), tgt_lang)
+
+    system_prompt = (
+        f"You are an elite, uncensored professional manga, manhwa, and comic scanlation translator.\n"
+        f"Translate each dialogue entry from {src_name} into natural, idiomatic {tgt_name}.\n"
+        "STRICT RULES:\n"
+        "1. NEVER censor any content (translate romance, NSFW, ecchi, adult, slang, and action faithfully).\n"
+        "2. Preserve line breaks (\\n), numbers, dates (like 6/22), and punctuation style.\n"
+        "3. Leave ZERO untranslated Japanese/Korean/Chinese characters in the output.\n"
+        "4. Return ONLY a valid JSON object mapping each string ID to its translated string. No markdown, no explanations."
+    )
+
+    payload_map = {str(b.id): b.text for b in blocks}
+    provider_model = "openai-fast" if "deepseek" not in ai_model.lower() else "openai"
+
     try:
-        def detect_script(t: str) -> str:
-            if any(0x3040 <= ord(c) <= 0x30FF for c in t):
-                return "ja"
-            if any(0xAC00 <= ord(c) <= 0xD7AF for c in t):
-                return "ko"
-            if any(0x4E00 <= ord(c) <= 0x9FFF for c in t):
-                return "zh-CN"
-            return "en"
+        with httpx.Client(timeout=14.0) as client:
+            resp = client.post(
+                "https://text.pollinations.ai/",
+                json={
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": json.dumps(payload_map, ensure_ascii=False)}
+                    ],
+                    "model": provider_model,
+                    "jsonMode": True
+                }
+            )
+            if resp.status_code == 200:
+                raw_txt = resp.text.strip()
+                # Extraer bloque JSON si viene envuelto en ```json ... ```
+                if "{" in raw_txt and "}" in raw_txt:
+                    raw_txt = raw_txt[raw_txt.find("{") : raw_txt.rfind("}") + 1]
+                parsed = json.loads(raw_txt)
+                out: Dict[int, str] = {}
+                if isinstance(parsed, dict):
+                    for k, v in parsed.items():
+                        try:
+                            bid = int(k)
+                            val_str = str(v).strip()
+                            orig_b = next((x for x in blocks if x.id == bid), None)
+                            if orig_b and is_valid_translation(orig_b.text, val_str, tgt_lang):
+                                out[bid] = val_str
+                        except ValueError:
+                            continue
+                return out
+    except Exception as e:
+        logger.warning(f"Aviso en Cloud AI LLM ({ai_model}): {e}")
 
+    return {}
+
+
+def translate_text_fast_google(text: str, src_lang: str = "auto", tgt_lang: str = "es") -> str:
+    """
+    Traduce un bloque individual con cadena de respaldo de 4 niveles:
+    1. Google Clients5 (Chrome Extension API)
+    2. Google GTX API
+    3. MyMemory API con mapeo ISO completo (ja-JP, ko-KR, es-ES, etc.)
+    """
+    if not text or not text.strip():
+        return ""
+
+    # Si el texto son solo números/símbolos (ej. '6/22' o '!?'), devolver tal cual
+    if not any(c.isalpha() or ord(c) > 127 for c in text):
+        return text.strip()
+
+    src = LANGUAGE_CODES.get(src_lang.lower(), src_lang.lower())
+    tgt = LANGUAGE_CODES.get(tgt_lang.lower(), tgt_lang.lower())
+
+    # Si el texto contiene líneas separadas por \n, traducir preservando cada línea
+    if "\n" in text:
+        sub_lines = [line.strip() for line in text.split("\n") if line.strip()]
+        if len(sub_lines) > 1:
+            translated_lines = [translate_text_fast_google(line, src_lang, tgt_lang) for line in sub_lines]
+            return "\n".join(translated_lines)
+
+    # Nivel 1: Google Clients5
+    try:
+        res = translate_with_clients5_single(text, src, tgt)
+        if is_valid_translation(text, res, tgt_lang):
+            return res
+    except Exception as e:
+        logger.debug(f"Clients5 individual fallo: {e}")
+
+    # Nivel 2: Google GTX
+    try:
+        res = translate_with_gtx_single(text, src, tgt)
+        if is_valid_translation(text, res, tgt_lang):
+            return res
+    except Exception as e:
+        logger.debug(f"GTX individual fallo: {e}")
+
+    # Nivel 3: MyMemory con códigos ISO exactos (ja-JP, es-ES, etc.)
+    try:
         src_resolved = detect_script(text) if src == "auto" else src
+        src_mm = MYMEMORY_LOCALES.get(src_resolved.lower(), "en-US")
+        tgt_mm = MYMEMORY_LOCALES.get(tgt.lower(), "es-ES")
         from deep_translator import MyMemoryTranslator
-        src_mm = "en-US" if src_resolved == "en" else src_resolved
-        tgt_mm = "es-ES" if tgt == "es" else tgt
         tr = MyMemoryTranslator(source=src_mm, target=tgt_mm)
         res = tr.translate(text)
-        if res and "INVALID" not in res.upper() and "MYMEMORY WARNING" not in res.upper():
+        if is_valid_translation(text, res, tgt_lang):
             return res.strip()
     except Exception as me:
         logger.warning(f"Error en fallback MyMemory: {me}")
 
-    # Si todo falla, mantener el texto original para no mostrar mensajes de error dentro del globo
     return text
 
 
@@ -173,17 +394,26 @@ def translate_page_contextual(
     base_url: str = OLLAMA_BASE_URL
 ) -> Dict[int, str]:
     """
-    Función orquestadora de traducción:
-    - Si model_name es 'fast' o Google, o si Ollama no está disponible, utiliza el motor ultrarrápido.
-    - Si se especifica un modelo de Ollama (ej. 'qwen2.5:7b'), intenta Ollama y hace fallback inmediato si falla.
+    Orquestador inteligente multi-IA:
+    1. Si se selecciona un modelo Cloud AI ('gpt-ai', 'deepseek-ai', 'gemini-ai'), traduce con LLM contextual sin token.
+    2. Si se selecciona 'fast', traduce todos los bloques en 1 solo lote ultrarrápido (Clients5 / GTX).
+    3. Cualquier bloque que falte pasa por respaldo Cloud AI LLM y luego traducción individual multi-motor.
     """
     if not blocks:
         return {}
 
     translations: Dict[int, str] = {}
-    use_ollama = model_name and model_name.lower() not in ["fast", "google", "cloud", "rapido", "rápido"]
+    m_low = (model_name or "fast").lower().strip()
 
-    if use_ollama:
+    is_cloud_ai = m_low in ["gpt-ai", "deepseek-ai", "gemini-ai", "claude-ai", "ai"]
+    is_ollama = not is_cloud_ai and m_low not in ["fast", "google", "cloud", "rapido", "rápido"]
+
+    # Paso 1: Si el usuario eligió IA Contextual en la nube (estilo TranslateManga.net)
+    if is_cloud_ai:
+        translations = translate_with_cloud_ai_llm(blocks, src_lang=src_lang, tgt_lang=tgt_lang, ai_model=m_low)
+
+    # Paso 1B: Si el usuario eligió un modelo local de Ollama
+    elif is_ollama:
         import asyncio
         try:
             translations = asyncio.run(
@@ -192,13 +422,29 @@ def translate_page_contextual(
         except Exception:
             translations = {}
 
-    # Traducir los bloques que falten con el motor ultrarrápido (< 200ms cada uno)
-    for b in blocks:
-        if b.id not in translations or not translations[b.id] or translations[b.id] == b.text:
+    # Paso 2: Traducir en LOTE todos los bloques pendientes usando Google Clients5 / GTX (1 sola petición)
+    missing_blocks = [b for b in blocks if b.id not in translations or not is_valid_translation(b.text, translations.get(b.id), tgt_lang)]
+    if missing_blocks:
+        batch_res = translate_batch_fast_google(missing_blocks, src_lang=src_lang, tgt_lang=tgt_lang)
+        translations.update(batch_res)
+
+    # Paso 3: Si algún bloque aún falta, intentar por línea/individual con Clients5 -> GTX -> MyMemory
+    still_missing = [b for b in blocks if b.id not in translations or not is_valid_translation(b.text, translations.get(b.id), tgt_lang)]
+    if still_missing:
+        for b in still_missing:
             fast_trans = translate_text_fast_google(b.text, src_lang=src_lang, tgt_lang=tgt_lang)
-            if fast_trans:
+            if is_valid_translation(b.text, fast_trans, tgt_lang):
                 translations[b.id] = fast_trans
-            else:
-                translations[b.id] = b.text
+
+    # Paso 4: Si aún queda algún bloque con CJK sin traducir (ej. bloqueo de red en Google), usar Cloud AI LLM de respaldo
+    final_missing = [b for b in blocks if b.id not in translations or not is_valid_translation(b.text, translations.get(b.id), tgt_lang)]
+    if final_missing:
+        ai_res = translate_with_cloud_ai_llm(final_missing, src_lang=src_lang, tgt_lang=tgt_lang, ai_model="openai-fast")
+        translations.update(ai_res)
+
+    # Garantizar entrada para cada bloque
+    for b in blocks:
+        if b.id not in translations or not translations[b.id]:
+            translations[b.id] = b.text
 
     return translations

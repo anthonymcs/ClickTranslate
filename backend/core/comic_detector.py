@@ -170,32 +170,83 @@ def detect_comic_text(
         # Agrupar bloques de texto
         ctd_blocks = group_output(blks, lines, im_w, im_h, mask)
 
-        # Refinar máscara de texto
+        # Refinar máscara de texto y combinar con máscara neuronal base para cubrir contornos/strokes
+        _, mask_bin = cv2.threshold(mask, 50, 255, cv2.THRESH_BINARY)
         try:
             mask_refined = refine_mask(img_bgr, mask, ctd_blocks)
+            mask_refined = cv2.bitwise_or(mask_refined, mask_bin)
         except Exception as e:
             logger.warning(f"Error en refine_mask: {e}, usando máscara base")
-            mask_refined = mask
+            mask_refined = mask_bin
 
-        result_blocks = []
+        raw_blocks = []
         for blk in ctd_blocks:
             x1, y1, x2, y2 = blk.xyxy
             x1 = max(0, int(x1))
             y1 = max(0, int(y1))
             x2 = min(im_w, int(x2))
             y2 = min(im_h, int(y2))
+            bw, bh = x2 - x1, y2 - y1
 
-            if x2 - x1 < 4 or y2 - y1 < 4:
+            # Filtrar ruido microscópico
+            if bw < 14 or bh < 14 or (bw * bh) < 220:
                 continue
 
-            result_blocks.append({
+            raw_blocks.append({
                 "box": (x1, y1, x2, y2),
                 "lines": getattr(blk, "lines", []),
+                "vertical": bool(getattr(blk, "vertical", False)),
                 "conf": getattr(blk, "prob", 1.0),
                 "is_balloon": True
             })
 
-        return result_blocks, mask_refined
+        # Fusionar bloques superpuestos o anidados (evita duplicados o recortes partidos)
+        merged = True
+        while merged and len(raw_blocks) > 1:
+            merged = False
+            new_list = []
+            used = [False] * len(raw_blocks)
+            for i in range(len(raw_blocks)):
+                if used[i]:
+                    continue
+                b1 = raw_blocks[i]
+                x1_a, y1_a, x2_a, y2_a = b1["box"]
+                area_a = max(1, (x2_a - x1_a) * (y2_a - y1_a))
+
+                for j in range(i + 1, len(raw_blocks)):
+                    if used[j]:
+                        continue
+                    b2 = raw_blocks[j]
+                    x1_b, y1_b, x2_b, y2_b = b2["box"]
+                    area_b = max(1, (x2_b - x1_b) * (y2_b - y1_b))
+
+                    ix1, iy1 = max(x1_a, x1_b), max(y1_a, y1_b)
+                    ix2, iy2 = min(x2_a, x2_b), min(y2_a, y2_b)
+                    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+
+                    # También fusionar si están en la misma línea horizontal y se tocan (< 12px)
+                    v_overlap = max(0, min(y2_a, y2_b) - max(y1_a, y1_b))
+                    min_h = min(y2_a - y1_a, y2_b - y1_b)
+                    h_gap = max(0, max(x1_a, x1_b) - min(x2_a, x2_b))
+                    same_h_line = (not b1["vertical"] and not b2["vertical"]) and (v_overlap > 0.6 * min_h) and (h_gap <= 12)
+
+                    if (inter / min(area_a, area_b)) >= 0.30 or same_h_line:
+                        x1_a, y1_a = min(x1_a, x1_b), min(y1_a, y1_b)
+                        x2_a, y2_a = max(x2_a, x2_b), max(y2_a, y2_b)
+                        area_a = max(1, (x2_a - x1_a) * (y2_a - y1_a))
+                        b1 = {
+                            "box": (x1_a, y1_a, x2_a, y2_a),
+                            "lines": b1["lines"] + b2["lines"],
+                            "vertical": b1["vertical"] and b2["vertical"],
+                            "conf": max(b1["conf"], b2["conf"]),
+                            "is_balloon": True
+                        }
+                        used[j] = True
+                        merged = True
+                new_list.append(b1)
+            raw_blocks = new_list
+
+        return raw_blocks, mask_refined
 
     except Exception as e:
         logger.error(f"Error en detect_comic_text: {e}")
