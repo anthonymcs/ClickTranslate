@@ -83,9 +83,18 @@ def resolve_font_path(preferred_names: List[str], need_cjk: bool = False) -> Opt
     return None
 
 
-def get_font(size: int, is_sfx: bool = False, need_cjk: bool = False) -> ImageFont.FreeTypeFont:
+def get_font(size: int, is_sfx: bool = False, need_cjk: bool = False, clean_sans: bool = False) -> ImageFont.FreeTypeFont:
     """Carga la fuente apropiada con el tamaño deseado."""
-    preferred = ["ComicBold.ttf", "WildWords.ttf", "AnimeAce.ttf", "animeace.ttf", "Comic.ttf", "comic.ttf"]
+    if clean_sans:
+        preferred = ["segoeuib.ttf", "arialbd.ttf", "ComicBold.ttf"]
+        for sf in ["C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf"]:
+            if not need_cjk and os.path.isfile(sf):
+                try:
+                    return ImageFont.truetype(sf, size=size)
+                except Exception:
+                    pass
+    else:
+        preferred = ["ComicBold.ttf", "WildWords.ttf", "AnimeAce.ttf", "animeace.ttf", "Comic.ttf", "comic.ttf"]
     font_path = resolve_font_path(preferred, need_cjk=need_cjk)
 
     if font_path:
@@ -121,14 +130,19 @@ def calculate_text_dimensions(
     return max_w, max(0, total_h)
 
 
-def wrap_preserving_newlines(text: str, chars_per_line: int) -> List[str]:
-    """Envuelve el texto respetando los saltos de línea explícitos (\\n)."""
+def wrap_preserving_newlines(text: str, chars_per_line: int, allow_break_words: bool = False) -> List[str]:
+    """Envuelve el texto respetando los saltos de línea explícitos (\\n) sin cortar palabras a la mitad."""
     paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
     if not paragraphs:
         return [text]
     all_lines: List[str] = []
     for p in paragraphs:
-        wrapped = textwrap.wrap(p, width=chars_per_line, break_long_words=True)
+        wrapped = textwrap.wrap(
+            p,
+            width=chars_per_line,
+            break_long_words=allow_break_words,
+            break_on_hyphens=False
+        )
         if wrapped:
             all_lines.extend(wrapped)
         else:
@@ -188,39 +202,43 @@ def fit_text_in_balloon(
     box_h: int,
     is_sfx: bool = False,
     has_stroke: bool = False,
-    min_size: int = 9,
-    max_size: Optional[int] = None
+    min_size: int = 8,
+    max_size: Optional[int] = None,
+    clean_sans: bool = False
 ) -> Tuple[List[str], ImageFont.ImageFont, int, int, int]:
     """
     Encuentra de forma adaptativa el tamaño de fuente óptimo y la división en líneas (word-wrap)
     para que el texto encaje perfectamente en el bounding box a cualquier resolución de imagen.
     """
     need_cjk = contains_cjk_glyphs(text)
-    text = sanitize_for_comic_font(text, need_cjk=need_cjk).upper()
+    text = sanitize_for_comic_font(text, need_cjk=need_cjk)
+    if not clean_sans:
+        text = text.upper()
 
     if max_size is None:
         # Escalar el límite superior proporcionalmente a las dimensiones de la caja (soporta imágenes 2K/4K)
-        max_size = max(28, min(110, int(min(box_w, box_h) * 0.58)))
+        max_size = max(26, min(100, int(min(box_w, box_h) * 0.54)))
 
     usable_w = max(20, int(box_w * (0.95 if is_sfx else 0.90)))
     usable_h = max(20, int(box_h * (0.94 if is_sfx else 0.90)))
 
-    best_font = get_font(size=min_size, is_sfx=is_sfx, need_cjk=need_cjk)
+    best_font = get_font(size=min_size, is_sfx=is_sfx, need_cjk=need_cjk, clean_sans=clean_sans)
     best_lines = [text]
     best_w, best_h = box_w, box_h
     best_spacing = 3
 
     for size in range(max_size, min_size - 1, -1):
-        font = get_font(size=size, is_sfx=is_sfx, need_cjk=need_cjk)
-        stroke_w = max(2, int(size * 0.10)) if has_stroke else 0
-        line_spacing = max(2, int(size * 0.14))
+        font = get_font(size=size, is_sfx=is_sfx, need_cjk=need_cjk, clean_sans=clean_sans)
+        stroke_w = max(2, int(size * 0.09)) if (has_stroke and not clean_sans) else (1 if has_stroke else 0)
+        line_spacing = max(2, int(size * 0.16))
 
         # Medir el ancho real promedio de un carácter con esta fuente
-        sample_bbox = draw.textbbox((0, 0), "ABCDEFGHIJKLMN", font=font)
-        avg_char_w = max(4.0, (sample_bbox[2] - sample_bbox[0]) / 14.0)
+        sample_str = "abcdefghijklmnopqrs" if clean_sans else "ABCDEFGHIJKLMN"
+        sample_bbox = draw.textbbox((0, 0), sample_str, font=font)
+        avg_char_w = max(4.0, (sample_bbox[2] - sample_bbox[0]) / len(sample_str))
         chars_per_line = max(3, int(usable_w / avg_char_w))
 
-        lines = wrap_preserving_newlines(text, chars_per_line)
+        lines = wrap_preserving_newlines(text, chars_per_line, allow_break_words=(size <= min_size))
         w_calc, h_calc = calculate_text_dimensions(draw, lines, font, line_spacing=line_spacing, stroke_w=stroke_w)
 
         if w_calc <= usable_w and h_calc <= usable_h:
@@ -236,9 +254,9 @@ def fit_text_in_balloon(
 
 def render_typesetting(img_bgr: np.ndarray, blocks: List[TextBlock]) -> np.ndarray:
     """
-    Dibuja los textos traducidos en la imagen limpia:
-    - Diálogos en globo claro: Centrados con auto-fit y color negro nítido estilo scanlation.
-    - Textos flotantes sobre fondo artístico complejo: Caja expandida con tarjeta translúcida de alto contraste para legibilidad 100%.
+    Dibuja los textos traducidos en la imagen:
+    - Diálogos en globo claro: Centrados con auto-fit sobre globo limpio/difuminado.
+    - Textos flotantes sobre ilustración: Tarjeta difuminada estilo Google Translate con tipografía nítida mixta de alto contraste.
     - Textos sobre fondo oscuro uniforme o SFX: Preservan el color de texto y el contorno (stroke) original.
     """
     im_h, im_w = img_bgr.shape[:2]
@@ -257,14 +275,16 @@ def render_typesetting(img_bgr: np.ndarray, blocks: List[TextBlock]) -> np.ndarr
         cy = (y1 + y2) // 2
 
         draw_tmp = ImageDraw.Draw(pil_img)
-        has_stroke = block.stroke_color is not None or block.type == "sfx" or block.draw_backdrop
+        use_clean_sans = bool(block.draw_backdrop)
+        has_stroke = (block.stroke_color is not None or block.type == "sfx") and not block.draw_backdrop
         lines, font, text_w, text_h, line_spacing = fit_text_in_balloon(
             draw_tmp,
             text,
             bw,
             bh,
             is_sfx=(block.type == "sfx" and not block.draw_backdrop),
-            has_stroke=has_stroke
+            has_stroke=has_stroke,
+            clean_sans=use_clean_sans
         )
 
         font_size = getattr(font, "size", 16)
@@ -275,25 +295,25 @@ def render_typesetting(img_bgr: np.ndarray, blocks: List[TextBlock]) -> np.ndarr
         curr_y = max(6, min(im_h - text_h - 6, cy - text_h // 2))
         eff_cx = max(text_w // 2 + 10, min(im_w - text_w // 2 - 10, cx))
 
-        # Si el texto flota sobre ilustración colorida (sin globo), dibujar tarjeta translúcida legible
+        # Si el texto flota sobre ilustración (estilo Google Translate), dibujar tarjeta translúcida sobre el difuminado
         if block.draw_backdrop:
             pad_x = max(10, int(font_size * 0.55))
             pad_y = max(8, int(font_size * 0.45))
             rx1 = max(2, eff_cx - text_w // 2 - pad_x)
             ry1 = max(2, curr_y - pad_y)
             rx2 = min(im_w - 2, eff_cx + text_w // 2 + pad_x)
-            ry2 = min(im_h - 2, curr_y + text_h + pad_y)
+            ry2 = min(im_h - 2, curr_y + text_h + pad_y + max(5, int(font_size * 0.25)))
 
             overlay = Image.new("RGBA", pil_img.size, (0, 0, 0, 0))
             ov_draw = ImageDraw.Draw(overlay)
-            border_c = (*block.stroke_color, 235) if block.stroke_color is not None else (129, 140, 248, 220)
-            radius = max(8, int(font_size * 0.50))
+            border_c = (*block.stroke_color, 210) if block.stroke_color is not None else (148, 163, 184, 190)
+            radius = max(8, int(font_size * 0.45))
             ov_draw.rounded_rectangle(
                 [rx1, ry1, rx2, ry2],
                 radius=radius,
-                fill=(14, 16, 24, 185),
+                fill=(15, 18, 28, 200),
                 outline=border_c,
-                width=max(2, int(font_size * 0.09))
+                width=max(2, int(font_size * 0.08))
             )
             pil_img = Image.alpha_composite(pil_img, overlay)
             text_fill = (255, 255, 255, 255)

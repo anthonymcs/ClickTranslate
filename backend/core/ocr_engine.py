@@ -287,7 +287,10 @@ def _extract_paddle_items(res_list) -> List[Dict[str, Any]]:
             if not txt_clean:
                 continue
             sc_val = float(sc)
-            if sc_val < 0.48:
+            if sc_val < 0.52:
+                continue
+            # Evitar falsos positivos de trazos artísticos cortos (1-2 caracteres) con baja confianza
+            if len(txt_clean) <= 2 and sc_val < 0.72:
                 continue
             if not _has_jp_or_cjk(txt_clean):
                 # Descartar ruido corto de puntuación/ASCII con baja confianza
@@ -321,10 +324,10 @@ def detect_and_read_japanese_paddle(
     max_dim = max(im_h, im_w)
     scale = 1.0
     if max_dim < 750:
-        scale = min(1.8, 800.0 / max(1, max_dim))
+        scale = min(1.7, 800.0 / max(1, max_dim))
         work_img = cv2.resize(img_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    elif max_dim > 1800:
-        scale = 1600.0 / max_dim
+    elif max_dim > 1400:
+        scale = 1280.0 / max_dim
         work_img = cv2.resize(img_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     else:
         work_img = img_bgr
@@ -348,7 +351,6 @@ def detect_and_read_japanese_paddle(
         bw, bh = x2 - x1, y2 - y1
         if bw < 6 or bh < 6:
             continue
-        # Verificar que en coordenadas originales sea vertical o al menos un carácter cuadrado/kana
         if bh >= bw * 0.65 or _has_kana(it["text"]):
             vertical_cols.append({
                 "box": (x1, y1, x2, y2),
@@ -357,16 +359,14 @@ def detect_and_read_japanese_paddle(
                 "vertical": True,
             })
 
-    # Pasada 2: Líneas horizontales detectadas por ComicDetector que no estén cubiertas por Pasada 1
+    # Pasada 2: Procesar TODAS las regiones detectadas por ComicDetector que no hayan sido cubiertas por Pasada 1
+    # (tanto horizontales como posibles bloques verticales perdidos)
     horizontal_lines: List[Dict[str, Any]] = []
-    uncovered_h_crops = []
+    uncovered_crops = []
     if comic_blocks:
         for cb in comic_blocks:
             bx1, by1, bx2, by2 = cb["box"]
             bw_c, bh_c = max(1, bx2 - bx1), max(1, by2 - by1)
-            if cb.get("vertical", False) and bh_c >= bw_c * 1.1:
-                continue
-            # Comprobar si ya fue cubierto por columnas verticales
             area_cb = bw_c * bh_c
             covered = 0
             for vc in vertical_cols:
@@ -376,10 +376,10 @@ def detect_and_read_japanese_paddle(
                 if ix2 > ix1 and iy2 > iy1:
                     covered += (ix2 - ix1) * (iy2 - iy1)
             if (covered / area_cb) < 0.35:
-                uncovered_h_crops.append((bx1, by1, bx2, by2))
+                uncovered_crops.append(((bx1, by1, bx2, by2), bool(cb.get("vertical", False) and bh_c >= bw_c * 1.15)))
 
-    if uncovered_h_crops:
-        for (bx1, by1, bx2, by2) in uncovered_h_crops:
+    if uncovered_crops:
+        for (bx1, by1, bx2, by2), is_vert_crop in uncovered_crops:
             pad = 14
             cx1, cy1 = max(0, bx1 - pad), max(0, by1 - pad)
             cx2, cy2 = min(im_w, bx2 + pad), min(im_h, by2 + pad)
@@ -388,33 +388,50 @@ def detect_and_read_japanese_paddle(
                 continue
             c_scale = 1.8 if max(crop.shape[:2]) < 260 else 1.0
             c_in = cv2.resize(crop, None, fx=c_scale, fy=c_scale, interpolation=cv2.INTER_CUBIC) if c_scale != 1.0 else crop
-            h_items = _extract_paddle_items(ocr.predict(c_in))
-            if h_items:
-                # Ordenar líneas de arriba hacia abajo y unir con \n
-                line_entries = []
-                for it in h_items:
-                    pts = it["poly"] / c_scale
-                    lx1 = max(0, int(cx1 + pts[:, 0].min()))
-                    ly1 = max(0, int(cy1 + pts[:, 1].min()))
-                    lx2 = min(im_w, int(cx1 + pts[:, 0].max()))
-                    ly2 = min(im_h, int(cy1 + pts[:, 1].max()))
-                    line_entries.append(((lx1, ly1, lx2, ly2), it["text"], it["score"]))
-                line_entries.sort(key=lambda e: (e[0][1] + e[0][3]) / 2.0)
-                ux1 = min(e[0][0] for e in line_entries)
-                uy1 = min(e[0][1] for e in line_entries)
-                ux2 = max(e[0][2] for e in line_entries)
-                uy2 = max(e[0][3] for e in line_entries)
-                joined = "\n".join(e[1] for e in line_entries)
-                avg_sc = float(np.mean([e[2] for e in line_entries]))
-                horizontal_lines.append({
-                    "box": (ux1, uy1, ux2, uy2),
-                    "poly_boxes": [e[0] for e in line_entries],
-                    "text": joined,
-                    "vertical": False,
-                    "score": avg_sc,
-                })
-    elif not vertical_cols:
-        # Fallback 0° en página completa si no se detectó nada en vertical
+            if is_vert_crop:
+                ch_in, cw_in = c_in.shape[:2]
+                c_rot = cv2.rotate(c_in, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                v_sub = _extract_paddle_items(ocr.predict(c_rot))
+                for it in v_sub:
+                    pts = it["poly"]
+                    ox = (cw_in - 1.0 - pts[:, 1]) / c_scale + cx1
+                    oy = pts[:, 0] / c_scale + cy1
+                    lx1, ly1 = max(0, int(np.floor(ox.min()))), max(0, int(np.floor(oy.min())))
+                    lx2, ly2 = min(im_w, int(np.ceil(ox.max()))), min(im_h, int(np.ceil(oy.max())))
+                    if lx2 - lx1 >= 6 and ly2 - ly1 >= 6:
+                        vertical_cols.append({
+                            "box": (lx1, ly1, lx2, ly2),
+                            "text": it["text"],
+                            "score": it["score"],
+                            "vertical": True,
+                        })
+            else:
+                h_items = _extract_paddle_items(ocr.predict(c_in))
+                if h_items:
+                    line_entries = []
+                    for it in h_items:
+                        pts = it["poly"] / c_scale
+                        lx1 = max(0, int(cx1 + pts[:, 0].min()))
+                        ly1 = max(0, int(cy1 + pts[:, 1].min()))
+                        lx2 = min(im_w, int(cx1 + pts[:, 0].max()))
+                        ly2 = min(im_h, int(cy1 + pts[:, 1].max()))
+                        line_entries.append(((lx1, ly1, lx2, ly2), it["text"], it["score"]))
+                    line_entries.sort(key=lambda e: (e[0][1] + e[0][3]) / 2.0)
+                    ux1 = min(e[0][0] for e in line_entries)
+                    uy1 = min(e[0][1] for e in line_entries)
+                    ux2 = max(e[0][2] for e in line_entries)
+                    uy2 = max(e[0][3] for e in line_entries)
+                    joined = "\n".join(e[1] for e in line_entries)
+                    avg_sc = float(np.mean([e[2] for e in line_entries]))
+                    horizontal_lines.append({
+                        "box": (ux1, uy1, ux2, uy2),
+                        "poly_boxes": [e[0] for e in line_entries],
+                        "text": joined,
+                        "vertical": False,
+                        "score": avg_sc,
+                    })
+    if not vertical_cols and not horizontal_lines:
+        # Fallback 0° en página completa si no se detectó nada aún
         h_items = _extract_paddle_items(ocr.predict(work_img))
         for it in h_items:
             pts = it["poly"] / scale

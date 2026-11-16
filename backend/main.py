@@ -99,16 +99,35 @@ def process_single_image_in_memory(
     # 1. Detección neuronal especializada con Comic-Text-Detector (ONNX)
     comic_blocks, text_mask = detect_comic_text(img_bgr)
 
-    # 2. Para Japonés (o modo 'auto' con texto vertical / manga), usar PaddleOCR PP-OCRv6 Dual-Orientation
+    # 2. Para Japonés (o modo 'auto' salvo que se detecte texto occidental claro), usar PaddleOCR PP-OCRv6 Dual-Orientation
     jp_regions = []
     has_vertical_hint = any(cb.get("vertical", False) for cb in comic_blocks)
     if is_japanese:
         jp_regions = detect_and_read_japanese_paddle(img_bgr, comic_blocks=comic_blocks)
-    elif lang_code == "auto" and (has_vertical_hint or not comic_blocks):
-        candidate_jp = detect_and_read_japanese_paddle(img_bgr, comic_blocks=comic_blocks)
-        if any(any((0x3040 <= ord(c) <= 0x30FF) for c in r.get("text", "")) for r in candidate_jp):
-            jp_regions = candidate_jp
-            is_japanese = True
+    elif lang_code == "auto":
+        should_probe_jp = has_vertical_hint or not comic_blocks
+        if not should_probe_jp:
+            # Sonda rápida con RapidOCR: si no es texto latino occidental claro, probar PP-OCRv6 japonés
+            probe_engine = get_rapid_ocr()
+            is_clear_western = False
+            if probe_engine is not None:
+                for cb in comic_blocks[:3]:
+                    px1, py1, px2, py2 = [max(0, int(v)) for v in cb["box"]]
+                    crop_p = img_bgr[py1:py2, px1:px2]
+                    if crop_p.size > 0:
+                        r_probe, _ = probe_engine(crop_p)
+                        if r_probe:
+                            txt_p = " ".join([it[1] for it in r_probe])
+                            latin_cnt = sum(1 for ch in txt_p if ("a" <= ch.lower() <= "z"))
+                            if latin_cnt >= 5 and not has_cjk(txt_p):
+                                is_clear_western = True
+                                break
+            should_probe_jp = not is_clear_western
+        if should_probe_jp:
+            candidate_jp = detect_and_read_japanese_paddle(img_bgr, comic_blocks=comic_blocks)
+            if any(any((0x3040 <= ord(c) <= 0x30FF) for c in r.get("text", "")) or has_cjk(r.get("text", "")) for r in candidate_jp):
+                jp_regions = candidate_jp
+                is_japanese = True
 
     active_regions = jp_regions if jp_regions else comic_blocks
 
@@ -366,69 +385,39 @@ def process_single_image_in_memory(
                     text_color = (int(fg_bgr[2]), int(fg_bgr[1]), int(fg_bgr[0]))
                     stroke_color = (int(stroke_bgr[2]), int(stroke_bgr[1]), int(stroke_bgr[0])) if stroke_bgr is not None else (255, 255, 255)
 
-                if bg_bright > 180 and (fg_sat > 25 or (stroke_bgr is not None and (int(np.max(stroke_bgr)) - int(np.min(stroke_bgr))) > 25)):
-                    # Texto o SFX a color sobre fondo claro o dentro de mini-globo blanco:
-                    sub_clean = cleaned_img[py1:py2, px1:px2]
-                    sub_g = gray[py1:py2, px1:px2]
-                    sub_sat = np.max(sub_clean, axis=2).astype(int) - np.min(sub_clean, axis=2).astype(int)
-                    is_black_lineart = (sub_g < 232) & (sub_sat < 18)
-                    has_balloon_border = float(np.mean((sub_g < 180) & (sub_sat < 18))) >= 0.02
-                    target_fill = np.array([255, 255, 255], dtype=np.uint8) if has_balloon_border else bg_median
-                    diff_target = np.linalg.norm(sub_clean.astype(np.float32) - target_fill.astype(np.float32), axis=2)
-                    if has_balloon_border:
-                        erase_m = (search_zone > 0) & (~is_black_lineart) & (sub_sat >= 18)
-                    elif is_uniform:
-                        erase_m = (search_zone > 0) & (~is_black_lineart) & ((sub_sat >= 16) | (diff_target > 6.0))
-                    else:
-                        erase_m = None
-
-                    if erase_m is not None:
-                        sub_clean[erase_m] = target_fill
-                        cleaned_img[py1:py2, px1:px2] = sub_clean
-                    else:
-                        # Texto flotante sobre cielo/paisaje claro: usar tarjeta scanlation legible + inpainting
-                        if np.count_nonzero(sub_mask) > 0:
-                            r_inp = max(5, min(14, int(min(bw, bh) * 0.12)))
-                            k_inp = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_inp + 1, 2 * r_inp + 1))
-                            dilated = cv2.dilate(sub_mask, k_inp, iterations=1)
-                            cleaned_img[py1:py2, px1:px2] = cv2.inpaint(cleaned_img[py1:py2, px1:px2], dilated, 5, cv2.INPAINT_TELEA)
-                        if len(extracted_text.replace("\n", "")) >= 7:
-                            draw_backdrop = True
-                elif is_uniform:
-                    # Fondo uniforme (oscuro, negro o sólido): reemplazar núcleo + contorno con el color exacto del fondo (bg_median)
+                if is_uniform:
+                    # Fondo uniforme (oscuro, negro o claro sólido): difuminar y homogeneizar al color exacto del fondo
                     sub_clean = cleaned_img[py1:py2, px1:px2]
                     diff_all = np.linalg.norm(sub_clean.astype(np.float32) - bg_median.astype(np.float32), axis=2)
                     erase_m = (search_zone > 0) & (diff_all > 6.0)
                     sub_clean[erase_m] = bg_median
                     cleaned_img[py1:py2, px1:px2] = sub_clean
                 else:
-                    # Fondo con dibujo artístico complejo: construir máscara combinada (text_mask + poly_boxes) y limpiar
-                    combined_sub_mask = sub_mask.copy()
-                    if poly_boxes:
-                        for (pbx1, pby1, pbx2, pby2) in poly_boxes:
-                            lx1, ly1 = max(0, pbx1 - px1), max(0, pby1 - py1)
-                            lx2, ly2 = min(px2 - px1, pbx2 - px1), min(py2 - py1, pby2 - py1)
-                            if lx2 > lx1 and ly2 > ly1:
-                                patch_sub = cleaned_img[py1 + ly1 : py1 + ly2, px1 + lx1 : px1 + lx2]
-                                p_sat = np.max(patch_sub, axis=2).astype(int) - np.min(patch_sub, axis=2).astype(int)
-                                p_bri = np.mean(patch_sub, axis=2)
-                                glyph_m = ((p_bri > 205) & (p_sat < 45)) | (p_sat > 65)
-                                combined_sub_mask[ly1:ly2, lx1:lx2][glyph_m] = 255
-                    if np.count_nonzero(combined_sub_mask) > 0:
-                        r_inp = max(4, min(12, int(min(bw, bh) * 0.10)))
-                        k_inp = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_inp + 1, 2 * r_inp + 1))
-                        dilated = cv2.dilate(combined_sub_mask, k_inp, iterations=1)
-                        inpainted = cv2.inpaint(cleaned_img[py1:py2, px1:px2], dilated, 5, cv2.INPAINT_TELEA)
-                        cleaned_img[py1:py2, px1:px2] = inpainted
-                    if len(extracted_text.replace("\n", "")) >= 7:
-                        draw_backdrop = True
+                    # Estilo Google Translate Imágenes: difuminar suavemente la región del texto original
+                    # y colocar encima la tarjeta translúcida con la traducción clara
+                    blur_boxes = poly_boxes if poly_boxes else [(x1, y1, x2, y2)]
+                    for (bx_p, by_p, bx2_p, by2_p) in blur_boxes:
+                        bpx1 = max(0, bx_p - 6)
+                        bpy1 = max(0, by_p - 6)
+                        bpx2 = min(im_w, bx2_p + 6)
+                        bpy2 = min(im_h, by2_p + 6)
+                        if bpx2 - bpx1 > 4 and bpy2 - bpy1 > 4:
+                            patch = cleaned_img[bpy1:bpy2, bpx1:bpx2]
+                            k_w = min(45, max(15, ((bpx2 - bpx1) // 2) | 1))
+                            k_h = min(45, max(15, ((bpy2 - bpy1) // 2) | 1))
+                            cleaned_img[bpy1:bpy2, bpx1:bpx2] = cv2.GaussianBlur(patch, (k_w, k_h), 0)
+                    draw_backdrop = True
 
-                # Si es diálogo flotante vertical estrecho sobre ilustración, ampliar caja horizontalmente para lectura clara
-                if draw_backdrop and bw < bh * 0.85:
-                    target_w = min(int(im_w * 0.28), max(bw * 2, int(bh * 0.60), 160))
+                # Si es diálogo flotante vertical estrecho, ampliar caja horizontalmente solo para diálogos reales (>= 7 caracteres)
+                if draw_backdrop and bw < bh * 0.90:
+                    clean_len = len(extracted_text.replace("\n", "").strip())
+                    if clean_len >= 7:
+                        est_w = max(bw + 24, min(int(im_w * 0.32), max(int(bh * 0.62), 160)))
+                    else:
+                        est_w = max(bw + 10, min(int(im_w * 0.14), 70))
                     cx_b = (x1 + x2) // 2
-                    rx1 = max(6, min(im_w - target_w - 6, cx_b - target_w // 2))
-                    rx2 = min(im_w - 6, rx1 + target_w)
+                    rx1 = max(6, min(im_w - est_w - 6, cx_b - est_w // 2))
+                    rx2 = min(im_w - 6, rx1 + est_w)
                     render_box = (rx1, max(6, y1 - 4), rx2, min(im_h - 6, y2 + 4))
 
             tb = TextBlock(

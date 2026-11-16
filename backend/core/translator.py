@@ -8,6 +8,7 @@ Módulo de Traducción Contextual y Multi-Modelo de IA de Alta Velocidad.
 
 import os
 import re
+import time
 import json
 import logging
 import unicodedata
@@ -89,7 +90,8 @@ def preprocess_japanese_for_translation(text: str) -> str:
     t = unicodedata.normalize("NFKC", text).strip()
     # Reemplazar marcadores de nombre oculto (〇〇 / ○○ / ◯◯) por guion legible
     t = re.sub(r"[〇○◯]{2,}", " ___ ", t)
-    # Normalizar alargamientos coloquiales comunes (でしょー -> でしょう, だよー -> だよ)
+    # Normalizar contracciones y alargamientos coloquiales comunes
+    t = t.replace("ワケ", "わけ").replace("ばっか", "ばかり")
     t = re.sub(r"(でしょ|ましょ|だろ|だろぅ)[ー～~]+", r"\1う", t)
     # Normalizar habla infantil típica de doujinshi/ecchi (でちゅ -> です, まちゅ -> ます)
     t = t.replace("でちゅよ", "ですよ").replace("でちゅね", "ですね").replace("でちゅ", "です")
@@ -98,6 +100,33 @@ def preprocess_japanese_for_translation(text: str) -> str:
     t = re.sub(r"「ちゅっ+」", "「キス」", t)
     t = re.sub(r"「ちゅ+」", "「キス」", t)
     return t.strip()
+
+
+def naturalize_translated_dialogue(text: str, tgt_lang: str) -> str:
+    """Pule giros demasiado literales para que el diálogo suene fluido y natural."""
+    if not text:
+        return text
+    out = text.strip()
+    if tgt_lang.lower().startswith("es"):
+        replacements = [
+            (r"\bhasta altas horas de la noche\b", "hasta tan tarde"),
+            (r"\ba altas horas de la noche\b", "tan tarde"),
+            (r"\bno hay manera\s+___\b", "no hay manera de que ___"),
+            (r"\bestuviese\b", "estuviera"),
+            (r"\bhubiese\b", "hubiera"),
+            (r"\bEn el momento en que\b", "Justo cuando"),
+            (r"\bpareces tener sueño\b", "se ve que tienes sueño"),
+            (r"\bAproximadamente\b", "Aprox."),
+            (r"\baproximadamente\b", "aprox."),
+        ]
+        for pat, rep in replacements:
+            out = re.sub(pat, rep, out)
+        # Quitar comillas dobles externas redundantes si envuelven todo el globo de manga
+        if len(out) >= 4 and ((out.startswith('"') and out.endswith('"')) or (out.startswith('“') and out.endswith('”'))):
+            inner = out[1:-1].strip()
+            if '"' not in inner and '“' not in inner:
+                out = inner
+    return out
 
 
 def detect_script(text: str) -> str:
@@ -228,6 +257,9 @@ def translate_batch_fast_google(
     return results
 
 
+_last_pollinations_ts: float = 0.0
+
+
 def translate_with_cloud_ai_llm(
     blocks: List[TextBlock],
     src_lang: str = "auto",
@@ -236,9 +268,12 @@ def translate_with_cloud_ai_llm(
 ) -> Dict[int, str]:
     """
     Traduce todos los bloques de la página usando IA Contextual en la nube (Pollinations AI)
-    SIN necesidad de Tokens ni API Keys. Ideal para diálogos de manga, modismos, comedia y NSFW.
+    SIN necesidad de Tokens ni API Keys, respetando el cooldown por IP para evitar esperas 402.
     """
+    global _last_pollinations_ts
     if not blocks:
+        return {}
+    if (time.time() - _last_pollinations_ts) < 46.0:
         return {}
 
     src_name = LANGUAGE_NAMES.get(src_lang.lower(), src_lang)
@@ -259,7 +294,8 @@ def translate_with_cloud_ai_llm(
     provider_model = "openai-fast" if "deepseek" not in ai_model.lower() else "openai"
 
     try:
-        with httpx.Client(timeout=30.0) as client:
+        _last_pollinations_ts = time.time()
+        with httpx.Client(timeout=18.0) as client:
             resp = client.post(
                 "https://text.pollinations.ai/",
                 json={
@@ -273,7 +309,6 @@ def translate_with_cloud_ai_llm(
             )
             if resp.status_code == 200:
                 raw_txt = resp.text.strip()
-                # Extraer bloque JSON si viene envuelto en ```json ... ```
                 if "{" in raw_txt and "}" in raw_txt:
                     raw_txt = raw_txt[raw_txt.find("{") : raw_txt.rfind("}") + 1]
                 parsed = json.loads(raw_txt)
@@ -289,6 +324,8 @@ def translate_with_cloud_ai_llm(
                         except ValueError:
                             continue
                 return out
+            elif resp.status_code == 402:
+                logger.info("Pollinations en espera de límite gratuito (45s), usando motor rápido directo.")
     except Exception as e:
         logger.warning(f"Aviso en Cloud AI LLM ({ai_model}): {e}")
 
@@ -477,9 +514,11 @@ def translate_page_contextual(
         ai_res = translate_with_cloud_ai_llm(final_missing, src_lang=src_lang, tgt_lang=tgt_lang, ai_model="openai-fast")
         translations.update(ai_res)
 
-    # Garantizar entrada para cada bloque
+    # Garantizar entrada para cada bloque y naturalizar diálogo en el idioma destino
     for b in blocks:
         if b.id not in translations or not translations[b.id]:
             translations[b.id] = b.text
+        else:
+            translations[b.id] = naturalize_translated_dialogue(translations[b.id], tgt_lang)
 
     return translations

@@ -99,7 +99,7 @@ def postprocess_mask(img: np.ndarray, thresh: Optional[float] = None) -> np.ndar
 
 def detect_comic_text(
     img_bgr: np.ndarray,
-    conf_thresh: float = 0.30,
+    conf_thresh: float = 0.22,
     nms_thresh: float = 0.35,
     input_size: Tuple[int, int] = (1024, 1024)
 ) -> Tuple[List[Dict[str, Any]], np.ndarray]:
